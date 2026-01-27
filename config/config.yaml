@@ -1,0 +1,61 @@
+# Trade Analyzer Configuration
+# All risk parameters are deterministic - no discretion
+
+# Account Settings
+account:
+  total_capital: 100000        # Total portfolio value ($)
+  max_risk_per_trade: 0.02     # 2% max risk per trade
+  max_risk_per_day: 0.06       # 6% max daily loss limit
+  max_open_positions: 5        # Max concurrent trades
+
+# Position Sizing
+sizing:
+  default_contracts: 1         # Fallback if calculation fails
+  min_premium_to_consider: 0.50  # Ignore cheap premiums
+  use_volatility_adjustment: true  # Reduce size in high IV
+
+# Stop Loss Rules
+stops:
+  default_pct: 0.50           # 50% of premium as initial stop
+  max_loss_per_contract: 500  # Hard cap on $ loss per contract
+  profit_protection: true     # Move to breakeven at 2R
+  profit_protection_r: 2.0    # At 2x risk, trail to breakeven
+
+# Target & Runner Rules
+targets:
+  profit_target_r: 2.0         # First target at 2x risk
+  runner_activation_r: 3.0     # Sell half at 3x risk
+  runner_remaining_pct: 0.50   # Keep 50% for runner
+  max_runner_target_r: 5.0     # Hard target for runner
+  trailing_stop_runner: 0.25   # Trail runner by 25% of peak
+
+# AI Analysis Settings
+analysis:
+  enabled: true
+  provider: anthropic
+  model: claude-sonnet-4-5
+  red_flag_checks:
+    - iv_rank_above_70: "High IV Rank - theta decay risk"
+    - days_to_expiration_below_3: "Expiration < 3 days - gamma risk"
+    - strike_otm_above_10: "Strike > 10% OTM - low delta"
+    - premium_too_low: "Premium too low for effective hedging"
+    - size_exceeds_max: "Position size exceeds calculated maximum"
+
+# Discord Settings
+discord:
+  channel_id: YOUR_CHANNEL_ID  # Will be set via environment
+  bot_token: YOUR_BOT_TOKEN    # Will be set via environment
+  response_template: "compact"  # compact | detailed
+
+# Supported Alert Formats
+# Parser will try these patterns in order
+alert_formats:
+  - name: "demon_standard"
+    pattern: "(?i)(?:BUY|SELL|SIGNAL)\\s+([A-Z]+)(?:\\s+\\d+/\\d+)?\\s*(\\d+)\\s*(CALL|PUT)\\s*@\\s*(\\d+\\.?\\d*)"
+    fields: ["ticker", "strike", "type", "premium"]
+    example: "BUY AAPL 01/31 215 CALL @ 3.50"
+
+  - name: "simplified"
+    pattern: "(?i)([A-Z]+)\\s+(CALL|PUT)\\s*(\\d+)\\s*@\\s*(\\d+\\.?\\d*)"
+    fields: ["ticker", "type", "strike", "premium"]
+    example: "AAPL CALL 215 @ 3.50"
