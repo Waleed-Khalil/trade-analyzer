@@ -54,6 +54,7 @@ class RiskEngine:
         self.sizing = self.config.get('sizing', {})
         self.stops = self.config.get('stops', {})
         self.targets = self.config.get('targets', {})
+        self.ode = self.config.get('ode', {})
     
     def calculate_position(self, trade, current_price: float = None) -> PositionSize:
         """
@@ -100,29 +101,38 @@ class RiskEngine:
             reasoning=reasoning
         )
     
+    def _get_stop_params(self, trade) -> tuple:
+        """Return (stop_pct, max_loss_per_contract) — use ODE params if same-day expiration."""
+        use_ode = getattr(trade, "is_ode", False) and self.ode.get("enabled", True)
+        if use_ode:
+            return (
+                self.ode.get("stop_pct", 0.35),
+                self.ode.get("max_loss_per_contract", 300),
+            )
+        return (
+            self.stops.get("default_pct", 0.50),
+            self.stops.get("max_loss_per_contract", 500),
+        )
+
     def calculate_stops(self, trade, position: PositionSize, current_price: float = None) -> Dict[str, float]:
         """
-        Calculate stop loss levels.
+        Calculate stop loss levels. Uses tighter ODE params for same-day expiration.
         """
-        default_pct = self.stops.get('default_pct', 0.50)
-        max_loss_per_contract = self.stops.get('max_loss_per_contract', 500)
-        
-        # Primary stop: % of premium
-        stop_pct = default_pct
-        
+        stop_pct, max_loss_per_contract = self._get_stop_params(trade)
+
         # Calculate stop based on premium
         premium_stop = trade.premium * (1 - stop_pct)
-        
+
         # Calculate stop based on max loss cap
         dollar_stop = trade.premium - (max_loss_per_contract / 100)
-        
+
         # Use whichever is tighter (more conservative)
         stop_loss = max(premium_stop, dollar_stop)
-        
+
         # Calculate risk percentage
         entry_risk = trade.premium - stop_loss
         risk_pct = (entry_risk / trade.premium) * 100 if trade.premium > 0 else 0
-        
+
         return {
             "stop_loss": round(stop_loss, 2),
             "risk_pct": round(risk_pct, 1),
@@ -130,26 +140,39 @@ class RiskEngine:
             "reasoning": f"Stop at ${stop_loss:.2f} ({risk_pct:.1f}% of premium)"
         }
     
+    def _get_target_params(self, trade) -> tuple:
+        """Return target params — use ODE params if same-day expiration."""
+        use_ode = getattr(trade, "is_ode", False) and self.ode.get("enabled", True)
+        if use_ode:
+            return (
+                self.ode.get("profit_target_r", 1.5),
+                self.ode.get("runner_activation_r", 2.0),
+                self.ode.get("runner_remaining_pct", 0.50),
+                self.ode.get("max_runner_target_r", 3.0),
+            )
+        return (
+            self.targets.get("profit_target_r", 2.0),
+            self.targets.get("runner_activation_r", 3.0),
+            self.targets.get("runner_remaining_pct", 0.50),
+            self.targets.get("max_runner_target_r", 5.0),
+        )
+
     def calculate_targets(self, trade, stop_info: Dict, position: PositionSize) -> Dict[str, Any]:
         """
-        Calculate profit targets and runner plan.
+        Calculate profit targets and runner plan. Uses ODE params for same-day expiration.
         """
-        profit_target_r = self.targets.get('profit_target_r', 2.0)
-        runner_activation_r = self.targets.get('runner_activation_r', 3.0)
-        runner_remaining_pct = self.targets.get('runner_remaining_pct', 0.50)
-        max_runner_target_r = self.targets.get('max_runner_target_r', 5.0)
-        
+        profit_target_r, runner_activation_r, runner_remaining_pct, max_runner_target_r = self._get_target_params(trade)
+
         stop_loss = stop_info.get('stop_loss', trade.premium * 0.5)
         risk_per_share = trade.premium - stop_loss
-        
-        # Target 1: 2R
+
         target_1 = trade.premium + (risk_per_share * profit_target_r)
         target_1_r = profit_target_r
-        
-        # Runner: Activate at 3R
+
         runner_contracts = int(position.contracts * runner_remaining_pct)
+        runner_contracts = max(runner_contracts, 1) if position.contracts >= 2 else 0
         runner_target = trade.premium + (risk_per_share * max_runner_target_r)
-        
+
         return {
             "target_1": round(target_1, 2),
             "target_1_r": target_1_r,
@@ -174,8 +197,10 @@ class RiskEngine:
             passed = False
             reasons.append(f"Risk {position.risk_percentage:.2%} exceeds max {max_risk:.2%}")
         
-        # Check minimum premium
+        # Check minimum premium (ODE allows lower)
         min_prem = self.sizing.get('min_premium_to_consider', 0.50)
+        if getattr(trade, "is_ode", False) and self.ode.get("enabled", True):
+            min_prem = self.ode.get("min_premium", 0.30)
         if trade.premium < min_prem:
             reasons.append(f"Premium ${trade.premium} below minimum ${min_prem}")
             passed = False

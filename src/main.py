@@ -1,14 +1,11 @@
 """
-Trade Analyzer - Main Entry Point
-Listens to Discord, parses trades, analyzes, and responds.
+Trade Analyzer — Option Play Analysis (no Discord)
+Paste an option play; get Go/No-Go, stop loss, take-profit levels, and support/resistance.
+Supports ODE (same-day / 0DTE) with tighter risk parameters.
 """
 
 import os
 import sys
-import asyncio
-import discord
-from discord.ext import commands
-from datetime import datetime
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,107 +13,400 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from parser.trade_parser import TradeParser, OptionTrade
 from risk_engine.risk_engine import RiskEngine
 from analysis.trade_analyzer import TradeAnalyzer
-from discord_output.discord_output import DiscordOutput
-import yaml
+from report.report import print_analysis_report
+
+# Load .env first so API keys are available everywhere
+def _load_env(repo_root: str) -> None:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(repo_root, ".env"))
+    except ImportError:
+        pass
 
 
-class TradeAnalyzerBot(commands.Bot):
-    """
-    Discord bot that monitors channels for trade alerts.
-    """
-    
-    def __init__(self, config_path: str = "config/config.yaml"):
-        self.config_path = config_path
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
-        
-        # Initialize components
-        self.parser = TradeParser(config_path)
-        self.engine = RiskEngine(config_path)
-        self.analyzer = TradeAnalyzer(config_path)
-        self.output = DiscordOutput(config_path)
-        
-        # Discord setup
-        token = self.config.get('discord', {}).get('bot_token', os.getenv('DISCORD_BOT_TOKEN'))
-        self.target_channel = self.config.get('discord', {}).get('channel_id', os.getenv('DISCORD_CHANNEL_ID'))
-        
-        intents = discord.Intents.default()
-        intents.message_content = True
-        
-        super().__init__(command_prefix="!", intents=intents)
-    
-    async def on_ready(self):
-        print(f"🤖 Trade Analyzer logged in as {self.user}")
-        print(f"📡 Monitoring channel: {self.target_channel}")
-    
-    async def on_message(self, message):
-        """
-        Process incoming messages for trade alerts.
-        Ignores messages from bots.
-        """
-        # Ignore bot messages (including own)
-        if message.author.bot:
-            return
-        
-        # Optionally: restrict to specific channel
-        # if str(message.channel.id) != self.target_channel:
-        #     return
-        
-        # Try to parse as trade alert
-        trade = self.parser.parse(message.content)
-        
-        if trade:
-            await self.process_trade(message.channel, trade, message.content)
-        
-        # Don't forget to process commands
-        await self.process_commands(message)
-    
-    async def process_trade(self, channel, trade: OptionTrade, raw_message: str):
-        """
-        Process a parsed trade: analyze and respond.
-        """
-        print(f"\n{'='*60}")
-        print(f"📨 Trade Detected: {trade.ticker} {trade.option_type} ${trade.strike}")
-        print(f"   Premium: ${trade.premium}")
-        print(f"{'='*60}")
-        
-        # Create trade plan
-        # Note: Would need real-time price in production
-        trade_plan = self.engine.create_trade_plan(trade)
-        
-        # AI analysis
-        analysis = self.analyzer.analyze(trade, trade_plan)
-        
-        # Format and send response
-        response = self.output.format_response(trade_plan, analysis)
-        
-        if 'content' in response:
-            await channel.send(response['content'])
-        elif 'embeds' in response:
-            await channel.send(**response)
-        
-        # Log result
-        print(f"\n✅ Decision: {trade_plan.go_no_go}")
-        if trade_plan.go_no_go_reasons:
-            for r in trade_plan.go_no_go_reasons:
-                print(f"   → {r}")
-        print(f"📊 Position: {trade_plan.position.contracts} contracts")
-        print(f"🛡️ Stop: ${trade_plan.stop_loss} | 🎯 Target: ${trade_plan.target_1}")
+def _parse_args(argv: list) -> tuple:
+    """Parse argv into (verbose, no_ai, no_market, play_parts)."""
+    verbose = False
+    no_ai = False
+    no_market = False
+    rest = []
+    for arg in argv:
+        if arg in ("--verbose", "-v"):
+            verbose = True
+        elif arg == "--no-ai":
+            no_ai = True
+        elif arg == "--no-market":
+            no_market = True
+        else:
+            rest.append(arg)
+    return verbose, no_ai, no_market, rest
 
 
-async def main():
-    """Main entry point"""
-    # Check for token
-    config_path = os.path.join(os.path.dirname(__file__), 'config', 'config.yaml')
-    
-    bot = TradeAnalyzerBot(config_path)
-    
-    print("🚀 Trade Analyzer starting...")
-    print("📝 Configuration loaded from:", config_path)
-    
-    async with bot:
-        await bot.start(bot.config.get('discord', {}).get('bot_token'))
+def get_option_play_input(play_parts: list) -> str:
+    """Read option play from play_parts, stdin, or interactive prompt."""
+    if play_parts:
+        return " ".join(play_parts).strip()
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    print("Paste your option play (e.g. NVDA 150 CALL @ 2.50 0DTE) and press Enter:")
+    return input().strip()
+
+
+def _supported_formats(config_path: str) -> list:
+    """Load supported format examples from config for error message."""
+    try:
+        import yaml
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+        formats = config.get("alert_formats", [])
+        return [f.get("example", "") for f in formats if f.get("example")]
+    except Exception:
+        return [
+            "BUY AAPL 01/31 215 CALL @ 3.50",
+            "AAPL CALL 215 @ 3.50",
+            "NVDA 150 CALL @ 2.50 0DTE",
+            "QQQ 630 CALL @ .20",
+        ]
+
+
+def _rule_based_recommendation(trade, trade_plan):
+    """Build recommendation from rule-based plan when AI is skipped or fails."""
+    class RuleRecommendation:
+        recommendation = trade_plan.go_no_go
+        reasoning = "; ".join(trade_plan.go_no_go_reasons) or "Rule-based pass/fail."
+        stop_loss_suggestion = f"${trade_plan.stop_loss} ({trade_plan.stop_risk_pct}% of premium)"
+        take_profit_levels = [
+            f"T1: ${trade_plan.target_1} ({trade_plan.target_1_r}R)",
+            f"Runner: {trade_plan.runner_contracts} @ ${trade_plan.runner_target}" if trade_plan.runner_contracts else "",
+        ]
+        support_resistance = []
+        ode_risks = ["Consider theta decay and time of day."] if getattr(trade, "is_ode", False) else []
+    return RuleRecommendation()
+
+
+def main() -> None:
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    config_path = os.path.join(repo_root, "config", "config.yaml")
+    _load_env(repo_root)
+
+    verbose, no_ai, no_market, play_parts = _parse_args(sys.argv[1:])
+    play_text = get_option_play_input(play_parts)
+    if not play_text:
+        print("No option play provided. Usage: python main.py [--verbose] [--no-ai] [--no-market] \"NVDA 150 CALL @ 2.50 0DTE\"")
+        sys.exit(1)
+
+    parser = TradeParser(config_path)
+    trade = parser.parse(play_text)
+    if not trade:
+        print("Could not parse the option play. Supported formats:")
+        for ex in _supported_formats(config_path):
+            print(f"  {ex}")
+        sys.exit(1)
+
+    # Optional: fetch underlying (Yahoo), option (Polygon), news (Brave Search)
+    current_price = None
+    market_context = {}
+    news_context = []
+    option_quote = None
+    if not no_market:
+        try:
+            from market_data.market_data import get_market_context, get_news_context
+            from market_data.polygon_client import get_option_live_price
+            market_context = get_market_context(trade.ticker)
+            current_price = market_context.get("current_price")
+            news_context = get_news_context(trade.ticker)
+            option_quote = get_option_live_price(trade)
+            if option_quote:
+                market_context["option_live"] = option_quote.get("last")
+                market_context["option_ticker"] = option_quote.get("option_ticker")
+                if option_quote.get("implied_volatility") is not None:
+                    market_context["implied_volatility"] = option_quote.get("implied_volatility")
+                if option_quote.get("break_even_price") is not None:
+                    market_context["break_even_price"] = option_quote.get("break_even_price")
+                if any(option_quote.get(g) is not None for g in ("delta", "gamma", "theta", "vega")):
+                    market_context["greeks"] = {
+                        k: option_quote[k] for k in ("delta", "gamma", "theta", "vega")
+                        if option_quote.get(k) is not None
+                    }
+                if option_quote.get("open_interest") is not None:
+                    market_context["open_interest"] = option_quote.get("open_interest")
+                if option_quote.get("volume") is not None:
+                    market_context["option_volume"] = option_quote.get("volume")
+            market_context["days_to_expiration"] = getattr(trade, "days_to_expiration", None)
+            # Strike context (ITM/OTM %), time to close (0DTE), pasted vs live
+            from analysis.context import get_strike_context, get_time_to_close_et_minutes, pasted_vs_live_premium_diff_pct
+            market_context.update(get_strike_context(trade, current_price))
+            if getattr(trade, "is_ode", False):
+                mins = get_time_to_close_et_minutes()
+                if mins is not None:
+                    market_context["minutes_to_close_et"] = mins
+            if option_quote and (live := option_quote.get("last")) is not None:
+                market_context["premium_diff_pct"] = pasted_vs_live_premium_diff_pct(trade.premium, live)
+            # Probability of Profit (Black-Scholes) when we have IV, spot, and DTE
+            dte = market_context.get("days_to_expiration")
+            if current_price and trade.strike and market_context.get("implied_volatility") is not None:
+                from analysis.greeks import probability_of_profit, days_to_years
+                t = days_to_years(dte if dte is not None else 0)
+                if t is not None and t > 0:
+                    iv = market_context["implied_volatility"]
+                    if iv <= 2:
+                        iv = iv  # already decimal
+                    else:
+                        iv = iv / 100.0
+                    pop = probability_of_profit(
+                        spot=current_price,
+                        strike=trade.strike,
+                        time_years=t,
+                        risk_free_rate=0.05,
+                        implied_vol=iv,
+                        option_type=getattr(trade, "option_type", "call"),
+                    )
+                    if pop is not None:
+                        market_context["probability_of_profit"] = round(pop, 2)
+                elif dte is not None and dte == 0:
+                    t_same_day = 0.5 / 365.0  # half day as proxy
+                    iv = market_context["implied_volatility"]
+                    if iv > 2:
+                        iv = iv / 100.0
+                    pop = probability_of_profit(
+                        spot=current_price,
+                        strike=trade.strike,
+                        time_years=t_same_day,
+                        risk_free_rate=0.05,
+                        implied_vol=iv,
+                        option_type=getattr(trade, "option_type", "call"),
+                    )
+                    if pop is not None:
+                        market_context["probability_of_profit"] = round(pop, 2)
+            # Multi-timeframe technical (RSI, MACD, SMA) when enabled
+            try:
+                import yaml
+                with open(config_path, "r") as f:
+                    cfg = yaml.safe_load(f) or {}
+                if (cfg.get("analysis") or {}).get("technical", {}).get("enabled", False):
+                    from market_data.technical import get_technical_context
+                    tech_ctx = get_technical_context(trade.ticker, cfg)
+                    if tech_ctx:
+                        market_context["technical"] = tech_ctx
+            except Exception:
+                pass
+        except Exception as e:
+            if verbose:
+                print(f"[verbose] Market data skipped: {e}", file=sys.stderr)
+            # Run without market data; AI and rules still work
+
+    # IV Rank & realized vol (historical IV from Polygon when available; realized from Yahoo)
+    if not no_market and trade.ticker:
+        try:
+            import yaml
+            with open(config_path, "r") as f:
+                cfg = yaml.safe_load(f)
+            iv_cfg = (cfg.get("analysis") or {}).get("iv_rank", {})
+            lookback = iv_cfg.get("lookback_days", 365)
+            rv_window = iv_cfg.get("realized_vol_window", 30)
+            market_context["iv_rank_high_threshold"] = iv_cfg.get("rank_high_threshold", 80)
+            market_context["iv_rank_low_threshold"] = iv_cfg.get("rank_low_threshold", 30)
+            from analysis.volatility import get_iv_rank, get_realized_volatility, get_historical_ivs_polygon
+            current_iv = market_context.get("implied_volatility")
+            option_ticker = market_context.get("option_ticker")
+            use_recompute = iv_cfg.get("use_historical_recompute", False)
+            max_iv_days = iv_cfg.get("max_historical_iv_days", 126)
+            min_samples = iv_cfg.get("min_historical_samples", 30)
+            sigma_low = iv_cfg.get("solver_sigma_low", 0.001)
+            sigma_high = iv_cfg.get("solver_sigma_high", 5.0)
+            historical_ivs = []
+            if use_recompute and option_ticker and current_iv is not None:
+                stress_cfg = (cfg.get("analysis") or {}).get("stress", {})
+                risk_free = stress_cfg.get("risk_free_rate", 0.05)
+                historical_ivs = get_historical_ivs_polygon(
+                    trade,
+                    option_ticker,
+                    lookback_days=min(lookback, max_iv_days),
+                    risk_free_rate=risk_free,
+                    max_days=max_iv_days,
+                    min_historical_samples=min_samples,
+                    sigma_low=sigma_low,
+                    sigma_high=sigma_high,
+                )
+            if current_iv is not None:
+                iv_dec = float(current_iv) if current_iv <= 2 else float(current_iv) / 100.0
+                iv_rank = get_iv_rank(iv_dec, historical_ivs)
+                if iv_rank is not None:
+                    market_context["iv_rank"] = round(iv_rank, 1)
+                    market_context["iv_rank_sample_count"] = len(historical_ivs)
+                    market_context["iv_rank_partial"] = max_iv_days < lookback
+                    market_context["iv_rank_max_days"] = max_iv_days
+                    market_context["iv_rank_min_samples"] = min_samples
+            realized = get_realized_volatility(trade.ticker, window_days=rv_window, days_back=min(lookback, 252))
+            if realized is not None:
+                market_context["realized_vol_30d"] = round(realized, 4)
+        except Exception:
+            pass
+
+    # ATR-based vol-adjusted levels (Yahoo daily OHLC); augments rule-based SL/targets
+    if not no_market and trade.ticker:
+        try:
+            import yaml
+            with open(config_path, "r") as f:
+                cfg = yaml.safe_load(f)
+            atr_cfg = (cfg.get("stops") or {}).get("atr", {})
+            period = atr_cfg.get("period", 14)
+            days_back = atr_cfg.get("days_back", 60)
+            sl_mult = atr_cfg.get("sl_multiplier", 1.5)
+            t1_mult = atr_cfg.get("t1_multiplier", 2.0)
+            t2_mult = atr_cfg.get("t2_multiplier", 4.0)
+            use_delta = atr_cfg.get("use_delta_adjust", True)
+            fallback_delta = atr_cfg.get("fallback_delta", 0.5)
+            min_atr = atr_cfg.get("min_atr_threshold", 1.0)
+            from market_data.market_data import get_atr
+            atr = get_atr(trade.ticker, period=period, days_back=days_back)
+            if atr is not None:
+                market_context["atr"] = round(atr, 2)
+                market_context["atr_period"] = period
+                if atr < min_atr:
+                    market_context["atr_low_vol"] = True
+                delta = None
+                if use_delta:
+                    g = (market_context.get("greeks") or {}).get("delta")
+                    if g is not None:
+                        delta = float(g)
+                    else:
+                        delta = fallback_delta
+                if delta is not None:
+                    entry_prem = trade.premium
+                    opt_type = (getattr(trade, "option_type", "CALL") or "CALL").upper()
+                    if opt_type == "CALL":
+                        atr_stop = entry_prem - delta * sl_mult * atr
+                        atr_t1 = entry_prem + delta * t1_mult * atr
+                        atr_t2 = entry_prem + delta * t2_mult * atr
+                    else:
+                        atr_stop = entry_prem - abs(delta) * sl_mult * atr
+                        atr_t1 = entry_prem + abs(delta) * t1_mult * atr
+                        atr_t2 = entry_prem + abs(delta) * t2_mult * atr
+                    market_context["atr_stop_was_negative"] = atr_stop < 0
+                    market_context["atr_stop"] = max(0.0, round(atr_stop, 2))
+                    market_context["atr_t1"] = max(0.0, round(atr_t1, 2))
+                    market_context["atr_t2"] = max(0.0, round(atr_t2, 2))
+                    market_context["atr_sl_multiplier"] = sl_mult
+                    market_context["atr_put"] = opt_type == "PUT"
+        except Exception:
+            pass
+
+    # Rule-based plan (ODE params applied automatically when is_ode)
+    engine = RiskEngine(config_path)
+    trade_plan = engine.create_trade_plan(trade, current_price=current_price)
+
+    # Stress test: P/L for instant underlying moves (Black-Scholes reprice)
+    if current_price and trade.strike and market_context.get("implied_volatility") is not None:
+        try:
+            import yaml
+            from analysis.greeks import stress_test_scenarios, days_to_years
+            with open(config_path, "r") as f:
+                cfg = yaml.safe_load(f)
+            stress_cfg = (cfg.get("analysis") or {}).get("stress", {})
+            scenarios = stress_cfg.get("scenarios", [-0.02, -0.01, 0.01, 0.02])
+            r = stress_cfg.get("risk_free_rate", 0.05)
+            iv = market_context["implied_volatility"]
+            if iv > 2:
+                iv = iv / 100.0
+            dte = market_context.get("days_to_expiration")
+            if dte is None:
+                dte = getattr(trade, "days_to_expiration", 0) or 0
+            t = days_to_years(dte)
+            if t is None or t <= 0:
+                t = 0.5 / 365.0  # same-day proxy
+            risk_dollars = getattr(trade_plan.position, "max_risk_dollars", 0) or (
+                (trade.premium - trade_plan.stop_loss) * trade_plan.position.contracts * 100
+            )
+            stress_results = stress_test_scenarios(
+                spot=current_price,
+                strike=trade.strike,
+                entry_premium=trade.premium,
+                time_years=t,
+                risk_free_rate=r,
+                implied_vol=iv,
+                option_type=getattr(trade, "option_type", "call"),
+                contracts=trade_plan.position.contracts,
+                risk_dollars=risk_dollars,
+                scenario_pct_changes=scenarios,
+            )
+            if stress_results is not None:
+                market_context["stress_test"] = stress_results
+                market_context["stress_test_risk_dollars"] = risk_dollars
+        except Exception:
+            pass
+
+    # Rule-based analysis (red/green flags, setup quality)
+    analyzer = TradeAnalyzer(config_path)
+    analysis = analyzer.analyze(
+        trade, trade_plan, current_price=current_price,
+        market_context=market_context, option_live_price=option_quote.get("last") if option_quote else None,
+    )
+
+    # AI recommendation (Anthropic) — Go/No-Go, reasoning, stop, targets, levels
+    if no_ai:
+        recommendation = _rule_based_recommendation(trade, trade_plan)
+    else:
+        try:
+            from ai_agent.ai_agent import OptionAIAgent, RecommendationResult
+            agent = OptionAIAgent(config_path)
+            recommendation = agent.get_recommendation(
+                trade=trade,
+                trade_plan=trade_plan,
+                analysis=analysis,
+                current_price=current_price,
+                market_context=market_context,
+                news_context=news_context,
+            )
+        except ValueError as e:
+            print(f"  Note: {e}")
+            print("  Showing rule-based analysis only. Set ANTHROPIC_API_KEY for AI recommendation.\n")
+            recommendation = _rule_based_recommendation(trade, trade_plan)
+        except Exception as e:
+            if verbose:
+                print(f"[verbose] AI recommendation failed: {e}", file=sys.stderr)
+            recommendation = _rule_based_recommendation(trade, trade_plan)
+
+    # Sanity override: if pasted vs live differs by >100%, force DON'T PLAY (stale alert)
+    diff_pct = market_context.get("premium_diff_pct")
+    if diff_pct is not None and abs(diff_pct) > 100:
+        rec = getattr(recommendation, "recommendation", "")
+        if rec in ("PLAY", "GO"):
+            class OverrideRecommendation:
+                recommendation = "DON'T PLAY"
+                reasoning = (
+                    f"Overridden: Pasted vs live option price differs by {abs(diff_pct):.0f}% - "
+                    "alert is likely stale. Verify current premium before trading."
+                )
+                stop_loss_suggestion = getattr(recommendation, "stop_loss_suggestion", f"${trade_plan.stop_loss}")
+                take_profit_levels = getattr(recommendation, "take_profit_levels", [])
+                support_resistance = getattr(recommendation, "support_resistance", [])
+                ode_risks = getattr(recommendation, "ode_risks", [])
+            recommendation = OverrideRecommendation()
+
+    # Log PLAY signals to journal when enabled (min_score_to_log from config)
+    rec = getattr(recommendation, "recommendation", "")
+    if rec in ("PLAY", "GO"):
+        try:
+            from journal.journal import log_play_signal
+            log_id = log_play_signal(
+                trade, trade_plan, analysis, recommendation,
+                market_context=market_context,
+                config_path=config_path,
+            )
+            if log_id is not None and verbose:
+                print(f"[verbose] Journal logged signal id={log_id}", file=sys.stderr)
+        except Exception as ex:
+            if verbose:
+                print(f"[verbose] Journal log skipped: {ex}", file=sys.stderr)
+
+    print_analysis_report(
+        trade, trade_plan, analysis, recommendation,
+        current_price=current_price,
+        option_live_price=option_quote.get("last") if option_quote else None,
+        market_context=market_context,
+    )
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

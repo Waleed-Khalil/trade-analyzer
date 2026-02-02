@@ -1,5 +1,6 @@
 # Trade Analyzer Configuration
-# All risk parameters are deterministic - no discretion
+# Paste an option play (e.g. from Discord); get Go/No-Go, stop, targets, and levels.
+# ODE = same-day expiration (0DTE) — uses tighter risk parameters.
 
 # Account Settings
 account:
@@ -14,14 +15,35 @@ sizing:
   min_premium_to_consider: 0.50  # Ignore cheap premiums
   use_volatility_adjustment: true  # Reduce size in high IV
 
-# Stop Loss Rules
+# Stop Loss Rules (standard)
 stops:
   default_pct: 0.50           # 50% of premium as initial stop
   max_loss_per_contract: 500  # Hard cap on $ loss per contract
   profit_protection: true     # Move to breakeven at 2R
   profit_protection_r: 2.0    # At 2x risk, trail to breakeven
+  # ATR-based vol-adjusted levels (Yahoo daily OHLC); augments rule-based SL/targets
+  atr:
+    period: 14                # Wilder ATR lookback (days)
+    days_back: 60             # History to fetch for ATR
+    sl_multiplier: 1.5        # Stop: entry - (sl_mult * ATR * delta)
+    t1_multiplier: 2.0        # T1: entry + (t1_mult * ATR * delta)
+    t2_multiplier: 4.0        # Runner/T2 multiplier
+    use_delta_adjust: true    # Scale premium impact by option delta
+    fallback_delta: 0.5       # When Greeks missing (OTM-ish call default)
+    min_atr_threshold: 1.0    # If ATR < this, flag "low vol – static levels preferred"
 
-# Target & Runner Rules
+# ODE / 0DTE (same-day expiration) — tighter rules
+ode:
+  enabled: true               # Apply ODE rules when same-day expiration detected
+  stop_pct: 0.35              # Tighter stop: 35% of premium (theta/gamma risk)
+  max_loss_per_contract: 300  # Lower cap per contract
+  profit_target_r: 1.5        # First target at 1.5R (take profits faster)
+  runner_activation_r: 2.0    # Consider taking runner off earlier
+  runner_remaining_pct: 0.50
+  max_runner_target_r: 3.0    # Hard target for runner (don't get greedy)
+  min_premium: 0.30           # Lower min premium for 0DTE (lotto-style)
+
+# Target & Runner Rules (standard)
 targets:
   profit_target_r: 2.0         # First target at 2x risk
   runner_activation_r: 3.0     # Sell half at 3x risk
@@ -29,33 +51,106 @@ targets:
   max_runner_target_r: 5.0     # Hard target for runner
   trailing_stop_runner: 0.25   # Trail runner by 25% of peak
 
-# AI Analysis Settings
+# AI Analysis (Anthropic-compatible API) — Go/No-Go, reasoning, stop, targets, support/resistance
+# For MiniMax: set ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic and use model MiniMax-M2.1
+# For Anthropic: use model claude-sonnet-4-5 (no base URL needed)
 analysis:
   enabled: true
   provider: anthropic
-  model: claude-sonnet-4-5
+  model: MiniMax-M2.1
   red_flag_checks:
-    - iv_rank_above_70: "High IV Rank - theta decay risk"
-    - days_to_expiration_below_3: "Expiration < 3 days - gamma risk"
-    - strike_otm_above_10: "Strike > 10% OTM - low delta"
-    - premium_too_low: "Premium too low for effective hedging"
-    - size_exceeds_max: "Position size exceeds calculated maximum"
+    iv_rank_above_70: "High IV Rank - theta decay risk"
+    days_to_expiration_below_3: "Expiration < 3 days - gamma risk"
+    strike_otm_above_10: "Strike > 10% OTM - low delta"
+    premium_too_low: "Premium too low for effective hedging"
+    size_exceeds_max: "Position size exceeds calculated maximum"
+  # Greeks & probabilities: downgrade to HOLD/AVOID when breached
+  greeks:
+    pop_min: 0.50          # Probability of Profit below this => flag
+    theta_high_decay: -0.05  # Theta more negative than this => fast time decay risk
+    vega_high: 0.20        # Vega above => high IV sensitivity
+    option_volume_min: 500   # Option volume below => liquidity red flag
+    open_interest_min: 1000 # OI below => liquidity red flag
+  # Stress test: instant underlying move scenarios (P/L via Black-Scholes reprice)
+  stress:
+    scenarios: [-0.02, -0.01, 0.01, 0.02]  # % as decimals: -2%, -1%, +1%, +2%
+    # Current short-term risk-free rate (3-mo T-bill); update periodically from Treasury.gov or FRED
+    risk_free_rate: 0.0367
+    # Flag if -1% move causes loss >= this % of risk (vulnerable to small downside). Tunable.
+    downside_1pct_loss_threshold_pct: 50
+  # IV Rank & vol context (historical IV: Polygon recompute or external; realized vol from Yahoo)
+  iv_rank:
+    lookback_days: 365        # 52w for rank when historical IV available
+    rank_high_threshold: 80   # Rank > this => overpriced, caution on longs
+    rank_low_threshold: 30    # Rank < this => low IV, favorable for buys
+    realized_vol_window: 30   # Days for realized vol (Yahoo daily closes)
+    # Recompute historical IV from Polygon option aggs + Yahoo spot (no pre-computed IV API)
+    use_historical_recompute: true
+    max_historical_iv_days: 126  # Cap lookback to limit Polygon calls and compute (~6 months)
+    min_historical_samples: 30   # Require at least this many valid IVs for rank; else N/A
+    solver_sigma_low: 0.001      # IV solver (brentq) lower bound; tune if extreme IVs fail
+    solver_sigma_high: 5.0       # IV solver upper bound (500% annualized)
+  # Multi-timeframe technical confluence (RSI, MACD, SMA) for setup quality
+  technical:
+    enabled: true
+    timeframes: [daily, 1h]
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+    rsi_min_bullish: 50         # For calls: RSI above = bullish confluence
+    rsi_max_bearish: 50         # For puts: RSI below = bearish confluence
+    sma_periods: [20, 50]
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    confluence_score_bonus: 15   # Add to setup_score when bullish/bearish confluence
 
-# Discord Settings
-discord:
-  channel_id: YOUR_CHANNEL_ID  # Will be set via environment
-  bot_token: YOUR_BOT_TOKEN    # Will be set via environment
-  response_template: "compact"  # compact | detailed
+# Backtest: historical simulation to validate rules (yfinance only; BS for option pricing)
+backtest:
+  tickers: [QQQ, SPY]           # Underlyings to run
+  lookback_years: 2             # Years of daily data
+  min_trades: 30                # Require at least this many trades before reporting stats
+  # Entry filters (setup must pass all)
+  otm_pct_max: 0.02             # Call strike at most 2% OTM (0.01 = 1%)
+  pop_min: 0.40                 # PoP >= 40% (BS with IV = 30d realized vol); 0.50 = fewer setups
+  rv_rank_max: 80               # Realized-vol percentile (proxy for IV rank) <= 80%; 60 = stricter
+  atr_rr_min: 1.5               # R/R >= 1.5:1 (target/stop in premium space); 2.0 = stricter
+  dte_approx: 21                # Assume ~3-week options (days to expiry at entry)
+  # Exit rules (aligned with stops/targets)
+  target_r: 2.0                 # Take profit at 2R
+  stop_pct: 0.50                # Stop at 50% of premium
+  max_holding_days: 30          # Exit at expiry if not hit
+  risk_free_rate: 0.0367        # Same as stress/IV solver
 
-# Supported Alert Formats
-# Parser will try these patterns in order
+# Trading journal: log PLAY signals, update with exit, run summary
+journal:
+  enabled: true
+  log_path: logs/journal.csv    # CSV; create logs/ if missing
+  min_score_to_log: 75          # Only log when setup_score >= this (0 = log all PLAY)
+  commission_per_contract: 1.0  # Round-trip cost per contract for P/L (2x one-way)
+
+# Supported Alert Formats (paste from Discord or type manually)
+# Premium: (\\d+\\.?\\d*|\\.\\d+) allows .20, 0.20, 3.50
 alert_formats:
   - name: "demon_standard"
-    pattern: "(?i)(?:BUY|SELL|SIGNAL)\\s+([A-Z]+)(?:\\s+\\d+/\\d+)?\\s*(\\d+)\\s*(CALL|PUT)\\s*@\\s*(\\d+\\.?\\d*)"
+    pattern: "(?i)(?:BUY|SELL|SIGNAL)\\s+([A-Z]+)(?:\\s+\\d+/\\d+)?\\s*(\\d+)\\s*(CALL|PUT)\\s*@\\s*(\\d+\\.?\\d*|\\.\\d+)"
     fields: ["ticker", "strike", "type", "premium"]
     example: "BUY AAPL 01/31 215 CALL @ 3.50"
 
   - name: "simplified"
-    pattern: "(?i)([A-Z]+)\\s+(CALL|PUT)\\s*(\\d+)\\s*@\\s*(\\d+\\.?\\d*)"
+    pattern: "(?i)([A-Z]+)\\s+(CALL|PUT)\\s*(\\d+)\\s*@\\s*(\\d+\\.?\\d*|\\.\\d+)"
     fields: ["ticker", "type", "strike", "premium"]
     example: "AAPL CALL 215 @ 3.50"
+
+  - name: "with_0dte"
+    pattern: "(?i)(?:BUY|LONG)?\\s*([A-Z]+)\\s+(\\d+)\\s*(CALL|PUT)\\s*@\\s*(\\d+\\.?\\d*|\\.\\d+)\\s*(?:0DTE|0\\s*DTE|same\\s*day)?"
+    fields: ["ticker", "strike", "type", "premium"]
+    example: "NVDA 150 CALL @ 2.50 0DTE"
+
+  - name: "ticker_strike_type_premium"
+    pattern: "(?i)([A-Z]{1,5})\\s+(\\d+)\\s*(CALL|PUT)\\s*@\\s*(\\d+\\.?\\d*|\\.\\d+)"
+    fields: ["ticker", "strike", "type", "premium"]
+    example: "QQQ 630 CALL @ .20"
+
+  # Optional: add " EXP YYYY-MM-DD" or " EXP MM/DD/YYYY" to any play for explicit DTE
+  # Example: QQQ 628 CALL @ .63 EXP 2026-02-06

@@ -1,19 +1,22 @@
 # Trade Analyzer - Dependencies
-
-# Discord
-discord.py>=2.3.0
+# Paste an option play; get Go/No-Go, stop, targets, support/resistance. ODE/0DTE supported.
 
 # Configuration
 PyYAML>=6.0
 
-# AI/LLM (optional - enable for full analysis)
+# AI recommendations (set ANTHROPIC_API_KEY)
 anthropic>=0.3.0
 
-# Market Data (optional - enable for real-time data)
+# Market data: underlying price (optional)
 yfinance>=0.2.0
+# News context for AI (optional; set BRAVE_API_KEY)
+brave-search>=0.2.0
 
 # Testing
 pytest>=7.0.0
 
-# Utilities
+# Environment
 python-dotenv>=1.0.0
+
+# Greeks / Probability of Profit (Black-Scholes)
+scipy>=1.9.0
