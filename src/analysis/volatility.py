@@ -126,6 +126,46 @@ def get_historical_ivs_polygon(
     return ivs
 
 
+def compute_hv_rank(
+    ticker: str,
+    current_hv_decimal: float,
+    period: int = 252,
+    rolling_window: int = 21,
+) -> Optional[float]:
+    """
+    52-week realized-volatility rank as a proxy for IV rank when historical option IV is unavailable.
+    Uses rolling_window-day annualized realized vol over the last period trading days; rank is
+    (current - min) / (max - min) * 100. current_hv_decimal should be in same units as your 30d
+    realized vol (e.g. 0.14 for 14%). Returns 0-100 or None on failure.
+    """
+    try:
+        import yfinance as yf
+        import numpy as np
+        hist = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=True)
+        if hist is None or len(hist) < rolling_window or "Close" not in hist.columns:
+            return None
+        close = hist["Close"].dropna()
+        if len(close) < period:
+            return None
+        log_ret = np.log(close / close.shift(1)).dropna()
+        if len(log_ret) < period:
+            return None
+        # Rolling annualized vol (decimal)
+        rolling_std = log_ret.rolling(rolling_window).std()
+        rolling_hv = (rolling_std * np.sqrt(252)).dropna().tail(period)
+        if len(rolling_hv) < 2:
+            return None
+        low_hv = float(rolling_hv.min().item() if hasattr(rolling_hv.min(), "item") else rolling_hv.min())
+        high_hv = float(rolling_hv.max().item() if hasattr(rolling_hv.max(), "item") else rolling_hv.max())
+        if high_hv <= low_hv:
+            return 50.0
+        current = float(current_hv_decimal) if current_hv_decimal <= 2 else current_hv_decimal / 100.0
+        rank = (current - low_hv) / (high_hv - low_hv) * 100.0
+        return round(max(0.0, min(100.0, rank)), 1)
+    except Exception:
+        return None
+
+
 def get_realized_volatility(
     ticker: str,
     window_days: int = 30,

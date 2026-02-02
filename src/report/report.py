@@ -137,7 +137,10 @@ def print_analysis_report(
             iv_pct = iv * 100 if iv <= 2 else iv
             parts.append(f"Current IV: {iv_pct:.1f}%")
         if iv_rank is not None:
-            parts.append(f"52w Rank: {iv_rank:.0f}%")
+            if ctx.get("iv_rank_proxy") == "HV":
+                parts.append(f"52w HV rank (IV proxy): {iv_rank:.0f}%")
+            else:
+                parts.append(f"52w Rank: {iv_rank:.0f}%")
         else:
             parts.append("52w Rank: N/A (historical IV not in use)")
         if rv is not None:
@@ -234,18 +237,17 @@ def print_analysis_report(
     print(f"  Risk summary: Max loss ${trade_plan.position.max_risk_dollars:.0f} | Max gain at T1 ~${max_gain_t1:.0f} | Risk {trade_plan.position.risk_percentage:.1%} of capital")
     print()
 
-    # Stress test scenarios (instant underlying move => est. P/L; sorted worst to best)
+    # Stress test scenarios (always show section; N/A when IV/pricing unavailable)
     stress_results = (market_context or {}).get("stress_test")
+    print("  STRESS TEST SCENARIOS (instant move, no theta adjustment)")
+    print(sub)
     if stress_results:
-        print("  STRESS TEST SCENARIOS (instant move, no theta adjustment)")
-        print(sub)
         spot = current_price or 0
         for pct, pl, pct_ror in stress_results:
             sign = "+" if pct >= 0 else ""
             dollar_move = spot * pct if spot else 0
             dollar_str = f" (${dollar_move:+.2f})" if spot else ""
             print(f"  - {sign}{pct * 100:.1f}% underlying{dollar_str}: Est. P/L ${pl:.0f} ({pct_ror:+.1f}% of risk)")
-        # Theta decay hint when Greeks available
         ctx = market_context or {}
         g = ctx.get("greeks") or {}
         theta = g.get("theta") if isinstance(g, dict) else None
@@ -256,7 +258,16 @@ def print_analysis_report(
         dte = ctx.get("days_to_expiration")
         if dte is not None and dte < 3:
             print("  Note: Theta decay accelerates significantly near expiration—daily estimate is approximate.")
-        print()
+        if ctx.get("stress_test_iv_proxy"):
+            rv = ctx.get("realized_vol_30d")
+            rv_pct = (rv * 100 if rv is not None and rv <= 2 else rv) if rv is not None else None
+            if rv_pct is not None:
+                print(f"  Stress test using 30d realized vol ({rv_pct:.1f}%) as IV proxy (Polygon IV unavailable).")
+            else:
+                print("  (Using 30d realized vol as IV proxy.)")
+    else:
+        print("  N/A (IV or pricing unavailable)")
+    print()
 
     # Stop loss
     stop_text = getattr(recommendation, "stop_loss_suggestion", f"${trade_plan.stop_loss}")
@@ -273,6 +284,9 @@ def print_analysis_report(
             print("  [Low vol] ATR below threshold – static levels may be preferred.")
         if ctx.get("atr_stop_was_negative"):
             print("  Vol-adjusted SL below $0 – use intrinsic or static fallback.")
+        if ctx.get("atr_stop_floored"):
+            pct = ctx.get("atr_stop_floor_fraction", 0.2) * 100
+            print(f"  Vol-adjusted SL floored at {pct:.0f}% of premium (delta-scaled was invalid).")
         dte = ctx.get("days_to_expiration")
         if dte is not None and dte < 3:
             print("  ATR-based levels approximate; theta decay may dominate near expiration.")

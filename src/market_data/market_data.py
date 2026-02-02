@@ -184,11 +184,13 @@ def get_atr(
         import yfinance as yf
         t = yf.Ticker(ticker)
         hist = t.history(period=f"{days_back}d", interval="1d")
-        if hist is None or len(hist) < period or "High" not in hist.columns or "Low" not in hist.columns or "Close" not in hist.columns:
+        if hist is None or len(hist) < period:
             return None
-        high = hist["High"]
-        low = hist["Low"]
-        close = hist["Close"]
+        high = hist.get("High", hist.get("high"))
+        low = hist.get("Low", hist.get("low"))
+        close = hist.get("Close", hist.get("close"))
+        if high is None or low is None or close is None:
+            return None
         prev_close = close.shift(1)
         tr1 = high - low
         tr2 = (high - prev_close).abs()
@@ -196,7 +198,12 @@ def get_atr(
         tr = tr1.combine(tr2, max).combine(tr3, max)
         tr = tr.fillna(tr1)  # first row: no prev_close, use H-L only
         atr_series = tr.rolling(window=period).mean()
-        atr = _safe_float(atr_series.iloc[-1])
+        valid = atr_series.dropna()
+        if len(valid) == 0:
+            return None
+        atr = _safe_float(valid.iloc[-1])
+        if atr is None or (atr != atr):  # reject NaN
+            return None
         return atr
     except Exception:
         return None

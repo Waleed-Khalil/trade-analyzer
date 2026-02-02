@@ -240,8 +240,16 @@ def main() -> None:
             realized = get_realized_volatility(trade.ticker, window_days=rv_window, days_back=min(lookback, 252))
             if realized is not None:
                 market_context["realized_vol_30d"] = round(realized, 4)
-        except Exception:
-            pass
+            # HV rank fallback when historical IV is N/A (52w realized-vol rank as IV proxy)
+            if market_context.get("iv_rank") is None and iv_cfg.get("use_hv_rank_fallback", False) and realized is not None:
+                from analysis.volatility import compute_hv_rank
+                hv_rank = compute_hv_rank(trade.ticker, realized, period=252, rolling_window=21)
+                if hv_rank is not None:
+                    market_context["iv_rank"] = round(hv_rank, 1)
+                    market_context["iv_rank_proxy"] = "HV"
+        except Exception as e:
+            if verbose:
+                print(f"[verbose] IV rank / realized vol block skipped: {e}", file=sys.stderr)
 
     # ATR-based vol-adjusted levels (Yahoo daily OHLC); augments rule-based SL/targets
     if not no_market and trade.ticker:
@@ -258,6 +266,8 @@ def main() -> None:
             use_delta = atr_cfg.get("use_delta_adjust", True)
             fallback_delta = atr_cfg.get("fallback_delta", 0.5)
             min_atr = atr_cfg.get("min_atr_threshold", 1.0)
+            floor_fraction = atr_cfg.get("atr_sl_floor_fraction", 0.2)
+            low_delta_threshold = atr_cfg.get("low_delta_threshold", 0.3)
             from market_data.market_data import get_atr
             atr = get_atr(trade.ticker, period=period, days_back=days_back)
             if atr is not None:
@@ -284,20 +294,31 @@ def main() -> None:
                         atr_t1 = entry_prem + abs(delta) * t1_mult * atr
                         atr_t2 = entry_prem + abs(delta) * t2_mult * atr
                     market_context["atr_stop_was_negative"] = atr_stop < 0
+                    if atr_stop <= 0:
+                        # Floor: min stop as fraction of premium; use higher fraction for low-delta OTM
+                        frac = max(floor_fraction, 0.5) if (delta is not None and abs(delta) < low_delta_threshold) else floor_fraction
+                        atr_stop = entry_prem * frac
+                        market_context["atr_stop_floored"] = True
+                        market_context["atr_stop_floor_fraction"] = frac
                     market_context["atr_stop"] = max(0.0, round(atr_stop, 2))
                     market_context["atr_t1"] = max(0.0, round(atr_t1, 2))
                     market_context["atr_t2"] = max(0.0, round(atr_t2, 2))
                     market_context["atr_sl_multiplier"] = sl_mult
                     market_context["atr_put"] = opt_type == "PUT"
-        except Exception:
-            pass
+        except Exception as e:
+            if verbose:
+                print(f"[verbose] ATR block skipped: {e}", file=sys.stderr)
 
     # Rule-based plan (ODE params applied automatically when is_ode)
     engine = RiskEngine(config_path)
     trade_plan = engine.create_trade_plan(trade, current_price=current_price)
 
     # Stress test: P/L for instant underlying moves (Black-Scholes reprice)
-    if current_price and trade.strike and market_context.get("implied_volatility") is not None:
+    iv_for_stress = market_context.get("implied_volatility")
+    if iv_for_stress is None and market_context.get("realized_vol_30d") is not None:
+        iv_for_stress = market_context["realized_vol_30d"]
+        market_context["stress_test_iv_proxy"] = "30d realized"
+    if current_price and trade.strike and iv_for_stress is not None:
         try:
             import yaml
             from analysis.greeks import stress_test_scenarios, days_to_years
@@ -306,7 +327,7 @@ def main() -> None:
             stress_cfg = (cfg.get("analysis") or {}).get("stress", {})
             scenarios = stress_cfg.get("scenarios", [-0.02, -0.01, 0.01, 0.02])
             r = stress_cfg.get("risk_free_rate", 0.05)
-            iv = market_context["implied_volatility"]
+            iv = iv_for_stress
             if iv > 2:
                 iv = iv / 100.0
             dte = market_context.get("days_to_expiration")
@@ -333,8 +354,9 @@ def main() -> None:
             if stress_results is not None:
                 market_context["stress_test"] = stress_results
                 market_context["stress_test_risk_dollars"] = risk_dollars
-        except Exception:
-            pass
+        except Exception as e:
+            if verbose:
+                print(f"[verbose] Stress test block skipped: {e}", file=sys.stderr)
 
     # Rule-based analysis (red/green flags, setup quality)
     analyzer = TradeAnalyzer(config_path)

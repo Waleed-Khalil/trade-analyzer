@@ -31,6 +31,10 @@ stops:
     use_delta_adjust: true    # Scale premium impact by option delta
     fallback_delta: 0.5       # When Greeks missing (OTM-ish call default)
     min_atr_threshold: 1.0    # If ATR < this, flag "low vol – static levels preferred"
+    # When vol-adjusted SL <= 0, floor to this fraction of entry premium (e.g. 0.2 = 20%)
+    atr_sl_floor_fraction: 0.2
+    # When |delta| < this, optional fixed risk for SL floor (e.g. 0.5 = 50% of premium)
+    low_delta_threshold: 0.3
 
 # ODE / 0DTE (same-day expiration) — tighter rules
 ode:
@@ -90,6 +94,8 @@ analysis:
     min_historical_samples: 30   # Require at least this many valid IVs for rank; else N/A
     solver_sigma_low: 0.001      # IV solver (brentq) lower bound; tune if extreme IVs fail
     solver_sigma_high: 5.0       # IV solver upper bound (500% annualized)
+    # When historical IV is N/A, use 52w realized-vol rank as IV proxy (yfinance only)
+    use_hv_rank_fallback: true
   # Multi-timeframe technical confluence (RSI, MACD, SMA) for setup quality
   technical:
     enabled: true
@@ -115,6 +121,7 @@ backtest:
   pop_min: 0.40                 # PoP >= 40% (BS with IV = 30d realized vol); 0.50 = fewer setups
   rv_rank_max: 80               # Realized-vol percentile (proxy for IV rank) <= 80%; 60 = stricter
   atr_rr_min: 1.5               # R/R >= 1.5:1 (target/stop in premium space); 2.0 = stricter
+  # Looser baseline (20-50 trades): pop_min: 0.35, rv_rank_max: 90, atr_rr_min: 1.2
   dte_approx: 21                # Assume ~3-week options (days to expiry at entry)
   # Exit rules (aligned with stops/targets)
   target_r: 2.0                 # Take profit at 2R
