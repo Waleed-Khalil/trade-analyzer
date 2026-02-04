@@ -69,7 +69,9 @@ def print_analysis_report(
     
     if ctx.get("moneyness_label"):
         print(f"  Strike: {ctx['moneyness_label']}")
-    
+    be = ctx.get("break_even_price")
+    if be is not None:
+        print(f"  Break-even (exp): ${be:.2f}")
     if ctx.get("five_d_return_pct") is not None:
         sign = "+" if ctx["five_d_return_pct"] >= 0 else ""
         print(f"  5d Return: {sign}{ctx['five_d_return_pct']:.1f}%")
@@ -92,11 +94,11 @@ def print_analysis_report(
         print(sub)
         parts = []
         if g.get("delta") is not None:
-            parts.append(f"Δ {g['delta']:.2f}")
+            parts.append(f"Delta {g['delta']:.2f}")
         if g.get("gamma") is not None:
-            parts.append(f"Γ {g['gamma']:.4f}")
+            parts.append(f"Gamma {g['gamma']:.4f}")
         if g.get("theta") is not None:
-            parts.append(f"Θ {g['theta']:.4f}")
+            parts.append(f"Theta {g['theta']:.4f}")
         if g.get("vega") is not None:
             parts.append(f"V {g['vega']:.2f}")
         if iv is not None:
@@ -106,9 +108,13 @@ def print_analysis_report(
             print("  " + " | ".join(parts))
         
         if pop is not None:
-            flag = " ⚠️ <50%" if pop < 0.50 else ""
-            print(f"  PoP: {pop:.0%}{flag}")
-        
+            flag = " [!] <50%" if pop < 0.50 else ""
+            print(f"  PoP (prob ITM at exp): {pop:.0%}{flag}")
+        theta = g.get("theta")
+        if theta is not None:
+            prem = getattr(trade, "premium", 0) or 0.01
+            decay_pct = abs(theta) / prem * 100
+            print(f"  Theta (1d): ~${abs(theta):.2f}/share decay if flat (~{decay_pct:.0f}% of premium)")
         oi = ctx.get("open_interest")
         opt_vol = ctx.get("option_volume")
         if oi is not None or opt_vol is not None:
@@ -140,13 +146,50 @@ def print_analysis_report(
             rv_pct = rv * 100 if rv <= 2 else rv
             parts.append(f"30d HV: {rv_pct:.1f}%")
         print("  " + " | ".join(parts))
-        
+        if iv is not None and rv is not None:
+            iv_dec = iv if iv <= 2 else iv / 100.0
+            rv_dec = rv if rv <= 2 else rv / 100.0
+            if iv_dec > rv_dec * 1.1:
+                print("  -> IV vs 30d HV: rich (premium may be expensive; IV crush risk on long)")
+            elif iv_dec < rv_dec * 0.9:
+                print("  -> IV vs 30d HV: cheap (favorable for buying options)")
+            else:
+                print("  -> IV vs 30d HV: in line")
+        exp_move = ctx.get("expected_move_1sd")
+        exp_pct = ctx.get("expected_move_pct")
+        if exp_move is not None and current_price:
+            pct = (exp_pct * 100) if exp_pct is not None else (exp_move / current_price * 100)
+            print(f"  Expected move (1 SD to exp): ${exp_move:.2f} ({pct:.1f}%)")
         if iv_rank is not None:
             if iv_rank >= 80:
-                print("  → High IV = overpriced options, IV crush risk on long")
+                print("  -> High IV = overpriced options, IV crush risk on long")
             elif iv_rank < 30:
-                print("  → Low IV = favorable for buying options")
+                print("  -> Low IV = favorable for buying options")
         print()
+
+    # ============================================================
+    # EVENT RISK
+    # ============================================================
+    events = ctx.get("events")
+    if events is None:
+        events = {}
+    print("  EVENT RISK")
+    print(sub)
+    if not events:
+        print("  N/A - no major catalysts in DTE window")
+    else:
+        for event_type, details in events.items():
+            if not isinstance(details, dict):
+                continue
+            ev_date = details.get("date", "?")
+            days_to = details.get("days_to", 0)
+            day_label = "1 day away" if days_to == 1 else f"{days_to} days away"
+            if event_type == "earnings":
+                risk_note = "high vol risk, potential IV crush post-event"
+            else:
+                risk_note = "minor impact expected"
+            print(f"  Upcoming {event_type} on {ev_date} ({day_label}) - {risk_note}")
+    print()
 
     # ============================================================
     # TECHNICALS
@@ -165,7 +208,7 @@ def print_analysis_report(
         if daily.get("price_above_sma_50") is not None:
             parts.append(">50SMA" if daily["price_above_sma_50"] else "<50SMA")
         if daily.get("macd_bullish") is not None:
-            parts.append("MACD ▲" if daily["macd_bullish"] else "MACD ▼")
+            parts.append("MACD ^" if daily["macd_bullish"] else "MACD v")
         if parts:
             print("  Daily: " + " | ".join(parts))
         print()
@@ -184,11 +227,25 @@ def print_analysis_report(
             print(f"  {sign}{pct * 100:.1f}%{dollar}: ${pl:+.0f} ({pct_ror:+.1f}% of risk)")
         print()
 
+    # 1-DAY HOLD ESTIMATES (theta decay, no IV change)
+    theta_1d = ctx.get("theta_stress_1d")
+    theta_1d_premium = ctx.get("theta_stress_1d_premium")
+    if theta_1d and theta_1d_premium is not None:
+        print("  1-DAY HOLD ESTIMATES (incl. theta decay, no IV change)")
+        print(sub)
+        for label, est_prem, pct_chg in theta_1d:
+            sign = "+" if pct_chg >= 0 else ""
+            print(f"  {label} underlying: est. option ${est_prem:.2f} ({sign}{pct_chg:.1f}% from ${theta_1d_premium:.2f})")
+        print()
+    elif stress and ctx.get("greeks", {}).get("theta") is None:
+        print("  Theta-adjusted est. N/A (Greeks unavailable)")
+        print()
+
     # ============================================================
     # AI RECOMMENDATION - DETAILED
     # ============================================================
     rec = getattr(recommendation, "recommendation", trade_plan.go_no_go)
-    emoji = "✅ PLAY" if rec in ("PLAY", "GO") else "❌ DON'T PLAY"
+    emoji = "[PLAY]" if rec in ("PLAY", "GO") else "[DON'T PLAY]"
     
     print(sep)
     print(f"  {emoji}")
@@ -263,7 +320,7 @@ def print_analysis_report(
     print(f"  Decision: {trade_plan.go_no_go}")
     if trade_plan.go_no_go_reasons:
         for r in trade_plan.go_no_go_reasons:
-            print(f"    → {r}")
+            print(f"    -> {r}")
     print()
 
     # ============================================================
@@ -328,7 +385,7 @@ def print_analysis_report(
         for f in analysis.red_flags:
             msg = f.get("message", str(f))
             sev = f.get("severity", "")
-            print(f"  ⚠️  {msg}" + (f" [{sev}]" if sev else ""))
+            print(f"  [!]  {msg}" + (f" [{sev}]" if sev else ""))
         print()
 
     # ============================================================
@@ -340,11 +397,11 @@ def print_analysis_report(
         print(sub)
         for r in ode_risks:
             if r and r != "N/A":
-                print(f"  → {r}")
+                print(f"  -> {r}")
         if is_ode and not ode_risks:
-            print("  → Theta decay accelerates near close")
-            print("  → Gamma risk - sharp price moves")
-            print("  → Liquidity thins in final hours")
+            print("  -> Theta decay accelerates near close")
+            print("  -> Gamma risk - sharp price moves")
+            print("  -> Liquidity thins in final hours")
         print()
 
     # ============================================================
@@ -359,14 +416,24 @@ def print_analysis_report(
         
         bar_length = 20
         filled = int((score / 100) * bar_length)
-        bar = "█" * filled + "░" * (bar_length - filled)
+        bar = "#" * filled + "-" * (bar_length - filled)
         print(f"  {qual} | Score: {score}/100 | Confidence: {conf:.0%}")
         print(f"  [{bar}]")
-        
+        breakdown = getattr(analysis, "score_breakdown", None)
+        if breakdown:
+            b = breakdown
+            parts = [f"{b['base']} base", f"+{b['rules']} rules", f"+{b['greens']} greens",
+                     f"{b['reds']} reds", f"{b['pop']:+d} pop", f"+{b['liquidity']} liq",
+                     f"+{b['technical']} tech"]
+            if "events" in b:
+                parts.append(f"{b['events']} events")
+            if "theta_risk" in b and b["theta_risk"] != 0:
+                parts.append(f"{b['theta_risk']} theta")
+            print("  " + " ".join(parts) + f" = {score}")
         if analysis.green_flags:
-            print("  ✅ " + ", ".join(f.get("message", "") for f in analysis.green_flags if f.get("message")))
+            print("  [+] " + ", ".join(f.get("message", "") for f in analysis.green_flags if f.get("message")))
         if analysis.red_flags:
-            print("  ⚠️  " + ", ".join(f.get("message", "") for f in analysis.red_flags if f.get("message")))
+            print("  [!]  " + ", ".join(f.get("message", "") for f in analysis.red_flags if f.get("message")))
     print()
     print(sep)
     print()

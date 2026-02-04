@@ -217,6 +217,44 @@ def days_to_years(days: Optional[int]) -> Optional[float]:
     return days / 365.0
 
 
+def theta_stress_1d(
+    current_premium: float,
+    spot: float,
+    dte: int,
+    theta: Optional[float] = None,
+    delta: Optional[float] = None,
+    scenario_pct_changes: Optional[List[float]] = None,
+) -> Optional[List[Tuple[str, float, float]]]:
+    """
+    1-day hold estimates including theta decay (no IV change).
+    Returns list of (label, est_premium, pct_change_from_current) or None.
+    Theta is per-share per day (negative). Delta is used for spot-move effect (first-order).
+    If theta missing, uses rough proxy: theta ~ -premium / (DTE * 2).
+    """
+    if current_premium <= 0 or spot <= 0:
+        return None
+    if scenario_pct_changes is None:
+        scenario_pct_changes = [0.0, 0.01, -0.01, 0.02, -0.02]
+    theta_val = theta
+    if theta_val is None:
+        d = max(dte * 2, 1)
+        theta_val = -current_premium / d
+    delta_val = delta if delta is not None else 0.5
+    results = []
+    for pct in scenario_pct_changes:
+        spot_move = spot * pct
+        est = current_premium + theta_val + delta_val * spot_move
+        est = max(0.0, est)
+        pct_change = ((est - current_premium) / current_premium * 100) if current_premium else 0.0
+        if pct == 0:
+            label = "Flat"
+        else:
+            sign = "+" if pct >= 0 else ""
+            label = f"{sign}{pct * 100:.0f}%"
+        results.append((label, round(est, 2), round(pct_change, 1)))
+    return results
+
+
 def theta_high_decay_risk(theta: Optional[float], threshold: float = -0.05) -> bool:
     """
     True if theta is more negative than threshold (e.g. theta < -0.05 => fast time decay).

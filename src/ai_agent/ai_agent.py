@@ -12,6 +12,18 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 
+def _safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
+    """Coerce to float for formatting; APIs sometimes return strings."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class RecommendationResult:
     """Structured AI recommendation for an option play."""
@@ -113,6 +125,7 @@ class OptionAIAgent:
         """
         market_context = market_context or {}
         news_context = news_context or []
+        current_price = _safe_float(current_price) if current_price is not None else None
         price_str = f"{current_price:.2f}" if current_price is not None else "unknown"
 
         prompt = self._build_prompt(
@@ -152,25 +165,27 @@ class OptionAIAgent:
         # Build comprehensive market context
         mc_lines = []
         
-        # Core pricing
-        if market_context.get("current_price") is not None:
-            p = market_context["current_price"]
+        # Core pricing (coerce to float; APIs may return strings)
+        p = _safe_float(market_context.get("current_price"))
+        if p is not None:
             mc_lines.append(f"UNDERLYING PRICE: ${p:.2f}")
-            if market_context.get("high") is not None and market_context.get("low") is not None:
-                mc_lines.append(f"DAY RANGE: ${market_context['low']:.2f} - ${market_context['high']:.2f}")
-        
-        if market_context.get("option_live") is not None:
-            mc_lines.append(f"LIVE OPTION PRICE: ${market_context['option_live']:.2f}")
-        
-        if market_context.get("pasted_vs_live_premium_diff_pct") is not None:
-            diff = market_context["pasted_vs_live_premium_diff_pct"]
+            low = _safe_float(market_context.get("low"))
+            high = _safe_float(market_context.get("high"))
+            if low is not None and high is not None:
+                mc_lines.append(f"DAY RANGE: ${low:.2f} - ${high:.2f}")
+        opt_live = _safe_float(market_context.get("option_live"))
+        if opt_live is not None:
+            mc_lines.append(f"LIVE OPTION PRICE: ${opt_live:.2f}")
+        diff = _safe_float(market_context.get("pasted_vs_live_premium_diff_pct"))
+        if diff is not None:
             mc_lines.append(f"PREMIUM CHANGE: {diff:+.1f}% (pasted vs live)")
         
         if market_context.get("moneyness_label"):
             mc_lines.append(f"STRIKE STATUS: {market_context['moneyness_label']}")
         
-        if market_context.get("five_d_return_pct") is not None:
-            mc_lines.append(f"5-DAY RETURN: {market_context['five_d_return_pct']:+.1f}%")
+        five_d = _safe_float(market_context.get("five_d_return_pct"))
+        if five_d is not None:
+            mc_lines.append(f"5-DAY RETURN: {five_d:+.1f}%")
         
         if is_ode and market_context.get("minutes_to_close_et") is not None:
             m = market_context["minutes_to_close_et"]
@@ -181,27 +196,26 @@ class OptionAIAgent:
         if g:
             greek_parts = []
             for key in ["delta", "gamma", "theta", "vega"]:
-                if g.get(key) is not None:
-                    greek_parts.append(f"{key}={g[key]:.3f}")
+                v = _safe_float(g.get(key))
+                if v is not None:
+                    greek_parts.append(f"{key}={v:.3f}")
             if greek_parts:
                 mc_lines.append(f"GREEKS: {', '.join(greek_parts)}")
-
-        # Volatility
-        if market_context.get("implied_volatility") is not None:
-            iv = market_context["implied_volatility"]
+        iv = _safe_float(market_context.get("implied_volatility"))
+        if iv is not None:
             mc_lines.append(f"IV: {iv * 100:.1f}%" if iv <= 2 else f"IV: {iv:.1f}%")
-        
-        if market_context.get("probability_of_profit") is not None:
-            mc_lines.append(f"PROBABILITY OF PROFIT: {market_context['probability_of_profit']:.1%}")
-        
-        if market_context.get("break_even_price") is not None:
-            mc_lines.append(f"BREAK-EVEN: ${market_context['break_even_price']:.2f}")
-        
-        if market_context.get("iv_rank") is not None:
-            mc_lines.append(f"IV RANK: {market_context['iv_rank']:.0f}%")
-        
-        if market_context.get("realized_vol_30d") is not None:
-            mc_lines.append(f"30D REALIZED VOL: {market_context['realized_vol_30d']:.1f}%")
+        pop = _safe_float(market_context.get("probability_of_profit"))
+        if pop is not None:
+            mc_lines.append(f"PROBABILITY OF PROFIT: {pop:.1%}")
+        be = _safe_float(market_context.get("break_even_price"))
+        if be is not None:
+            mc_lines.append(f"BREAK-EVEN: ${be:.2f}")
+        ivr = _safe_float(market_context.get("iv_rank"))
+        if ivr is not None:
+            mc_lines.append(f"IV RANK: {ivr:.0f}%")
+        rv = _safe_float(market_context.get("realized_vol_30d"))
+        if rv is not None:
+            mc_lines.append(f"30D REALIZED VOL: {rv:.1f}%")
 
         # Technicals
         tech = market_context.get("technical") or {}
@@ -209,8 +223,9 @@ class OptionAIAgent:
             daily = tech.get("daily") or {}
             if daily:
                 parts = []
-                if daily.get("rsi") is not None:
-                    parts.append(f"RSI(14)={daily['rsi']:.0f}")
+                rsi_val = _safe_float(daily.get("rsi"))
+                if rsi_val is not None:
+                    parts.append(f"RSI(14)={rsi_val:.0f}")
                 if daily.get("price_above_sma_20") is not None:
                     parts.append(f"price {'>' if daily['price_above_sma_20'] else '<'} SMA-20")
                 if daily.get("macd_bullish") is not None:
@@ -223,11 +238,12 @@ class OptionAIAgent:
         if stress:
             for pct, pl, _ in stress:
                 if abs(pct - (-0.01)) < 0.001:
-                    mc_lines.append(f"STRESS -1%: ${pl:+.0f}")
-
-        # ATR levels
-        if market_context.get("atr_stop") is not None:
-            mc_lines.append(f"ATR STOP: ${market_context['atr_stop']:.2f}")
+                    pl_f = _safe_float(pl)
+                    if pl_f is not None:
+                        mc_lines.append(f"STRESS -1%: ${pl_f:+.0f}")
+        atr_stop = _safe_float(market_context.get("atr_stop"))
+        if atr_stop is not None:
+            mc_lines.append(f"ATR STOP: ${atr_stop:.2f}")
 
         mc_str = "\n".join(mc_lines)
 
@@ -244,8 +260,9 @@ class OptionAIAgent:
 
         # Stale alert warning
         stale_warning = ""
-        if market_context.get("premium_diff_pct") is not None:
-            diff = abs(market_context["premium_diff_pct"])
+        premium_diff_val = _safe_float(market_context.get("premium_diff_pct"))
+        if premium_diff_val is not None:
+            diff = abs(premium_diff_val)
             if diff > 50:
                 stale_warning = "\n⚠️ PASTED PREMIUM DIFFERS >50% FROM LIVE - ALERT LIKELY STALE"
 
@@ -401,28 +418,32 @@ ODE RISKS (if 0DTE):
     def _rule_based_fallback(self, trade: Any, trade_plan: Any, market_context: Dict, error: str) -> RecommendationResult:
         """Generate detailed fallback when AI is unavailable."""
         is_ode = getattr(trade, 'is_ode', False)
-        
-        # Calculate premium diff
-        premium_diff = market_context.get('premium_diff_pct', 0)
-        stale_warning = "⚠️ ALERT LIKELY STALE" if abs(premium_diff) > 50 else ""
-        
-        # Technical summary
+        premium_diff = _safe_float(market_context.get('premium_diff_pct'), 0) or 0
+        stale_warning = "ALERT LIKELY STALE" if abs(premium_diff) > 50 else ""
         tech = market_context.get('technical') or {}
         daily = tech.get('daily', {}) if isinstance(tech, dict) else {}
-        rsi = daily.get('rsi', 'N/A')
-        
+        rsi_val = _safe_float(daily.get('rsi'))
+        rsi_str = f"{rsi_val:.0f}" if rsi_val is not None else "N/A"
+        five_d = _safe_float(market_context.get('five_d_return_pct'))
+        five_d_val = five_d if five_d is not None else 0
+        five_d_str = f"{five_d:+.1f}%" if five_d is not None else "N/A"
+        iv_rank = _safe_float(market_context.get('iv_rank'), 50) or 50
+        max_risk = getattr(trade_plan.position, 'max_risk_dollars', None)
+        max_risk_str = f"${max_risk:.0f}" if isinstance(max_risk, (int, float)) else "N/A"
+        max_gain = getattr(trade_plan, 'max_gain_dollars', None)
+        max_gain_str = f"${max_gain:.0f}" if isinstance(max_gain, (int, float)) else "N/A"
         return RecommendationResult(
             recommendation=getattr(trade_plan, 'go_no_go', 'GO'),
             reasoning=f"""Rule-based analysis with {stale_warning}. 
             
-Primary factors: Position size ({getattr(trade_plan.position, 'contracts', 'N/A')} contracts) and max risk (${getattr(trade_plan.position, 'max_risk_dollars', 'N/A')}).
-Technicals: RSI {rsi}, underlying 5d return {market_context.get('five_d_return_pct', 'N/A'):+.1f}%.
-IV Rank: {market_context.get('iv_rank', 'N/A')}% - {'low IV = favorable for buys' if market_context.get('iv_rank', 100) < 30 else 'high IV = caution on longs' if market_context.get('iv_rank', 0) > 70 else 'moderate IV'}.
+Primary factors: Position size ({getattr(trade_plan.position, 'contracts', 'N/A')} contracts) and max risk ({max_risk_str}).
+Technicals: RSI {rsi_str}, underlying 5d return {five_d_str}.
+IV Rank: {iv_rank:.0f}% - {'low IV = favorable for buys' if iv_rank < 30 else 'high IV = caution on longs' if iv_rank > 70 else 'moderate IV'}.
 
 {stale_warning}""",
-            risk_assessment=f"""MAX LOSS: ${getattr(trade_plan.position, 'max_risk_dollars', 'N/A')} if stop at ${trade_plan.stop_loss} is hit.
-MAX GAIN: ~${getattr(trade_plan, 'max_gain_dollars', 'N/A')} if target at ${trade_plan.target_1} is hit ({trade_plan.target_1_r}R).
-PROBABILITY: Based on {'low IV' if market_context.get('iv_rank', 50) < 30 else 'high IV' if market_context.get('iv_rank', 50) > 70 else 'moderate'} volatility environment.""",
+            risk_assessment=f"""MAX LOSS: {max_risk_str} if stop at ${trade_plan.stop_loss} is hit.
+MAX GAIN: ~{max_gain_str} if target at ${trade_plan.target_1} is hit ({trade_plan.target_1_r}R).
+PROBABILITY: Based on {'low IV' if iv_rank < 30 else 'high IV' if iv_rank > 70 else 'moderate'} volatility environment.""",
             entry_criteria=f"""ENTRY ZONE: ${trade.premium - 0.05:.2f} - ${trade.premium + 0.05:.2f}
 CONFIRMATION: Wait for price to stabilize at or below entry zone before entering.
 TIMING: {'Trade early in day for 0DTE' if is_ode else 'Best during market hours'}.""",
@@ -431,13 +452,13 @@ TARGET 1: ${trade_plan.target_1} ({trade_plan.target_1_r}R) - take 50% off here.
 RUNNER: {trade_plan.runner_contracts} contracts @ ${trade_plan.runner_target} - trail to breakeven after taking partial.
 TIME EXIT: {'Exit 1 hour before close if not profitable' if is_ode else 'Exit at 50% DTE if not near targets'}.""",
             support_resistance=[
-                f"Support: ${trade.strike * 0.97:.0f} ({'major' if market_context.get('five_d_return_pct', 0) < -2 else 'minor'} level)",
+                f"Support: ${trade.strike * 0.97:.0f} ({'major' if five_d_val < -2 else 'minor'} level)",
                 f"Support: ${trade.strike * 0.95:.0f}",
                 f"Resistance: ${trade.strike * 1.02:.0f}",
                 f"Resistance: ${trade.strike * 1.05:.0f}",
             ],
-            market_context=f"""TREND: {'Bearish' if market_context.get('five_d_return_pct', 0) < -2 else 'Bullish' if market_context.get('five_d_return_pct', 0) > 2 else 'Neutral'} based on 5d return of {market_context.get('five_d_return_pct', 0):+.1f}%.
-VOLATILITY: IV Rank {market_context.get('iv_rank', 'N/A')}% - {'favorable for long options' if market_context.get('iv_rank', 50) < 40 else 'caution - IV crush risk'}.
-SENTIMENT: {'Fear' if market_context.get('iv_rank', 50) > 60 else 'Greed' if market_context.get('iv_rank', 50) < 40 else 'Neutral'} in {trade.ticker}.""",
+            market_context=f"""TREND: {'Bearish' if five_d_val < -2 else 'Bullish' if five_d_val > 2 else 'Neutral'} based on 5d return of {five_d_str}.
+VOLATILITY: IV Rank {iv_rank:.0f}% - {'favorable for long options' if iv_rank < 40 else 'caution - IV crush risk'}.
+SENTIMENT: {'Fear' if iv_rank > 60 else 'Greed' if iv_rank < 40 else 'Neutral'} in {trade.ticker}.""",
             ode_risks=["Theta decay accelerates near close - monitor time remaining.", "Gamma risk - price moves faster near expiration.", "Liquidity may thin in final hours."] if is_ode else ["N/A - not 0DTE"],
         )

@@ -55,8 +55,19 @@ python src/main.py
 - `--verbose` / `-v` — Log market-data and AI errors to stderr.
 - `--no-ai` — Use rule-based recommendation only (no API key needed).
 - `--no-market` — Skip Yahoo, Polygon, and Brave; use pasted data only.
+- `--dte N` / `-d N` — Set **days to expiration** (DTE) explicitly. Overrides any DTE from the play text. Analysis (stops, targets, ODE rules) uses this value.
 
-Example: `python src/main.py --no-ai --no-market "AAPL CALL 215 @ 3.50"`
+Example: `python src/main.py --no-ai --no-market "AAPL CALL 215 @ 3.50"`  
+Example with DTE: `python src/main.py --dte 2 "MSFT 430 CALL @ 0.79"`
+
+## DTE (Days to Expiration) — Universal Input
+
+DTE drives all time-sensitive logic: ODE vs standard rules, stop/target multipliers, PoP, and stress tests. You can set it in two ways:
+
+1. **In the play string** — Add `DTE N` or `N DTE` (e.g. `MSFT 430 CALL @ 0.79 DTE 2` or `... 2 DTE`). Expiration date is then computed as today + N days.
+2. **CLI override** — Use `--dte N` (or `-d N`). This overrides DTE from the play and applies to the whole analysis.
+
+When DTE is 0, same-day (0DTE/ODE) rules apply (tighter stop, faster targets). For any N ≥ 0, the report and risk engine use this single value consistently.
 
 ## Supported Play Formats
 
@@ -64,9 +75,10 @@ Example: `python src/main.py --no-ai --no-market "AAPL CALL 215 @ 3.50"`
 - `AAPL CALL 215 @ 3.50`
 - `NVDA 150 CALL @ 2.50 0DTE`  (same-day)
 - `SPY 600 CALL @ 1.25`
-- `QQQ 628 CALL @ .63 EXP 2026-02-06`  (explicit expiration; DTE computed)
+- `QQQ 628 CALL @ .63 EXP 2026-02-06`  (explicit expiration; DTE computed from date)
+- `MSFT 430 CALL @ 0.79 DTE 2`  or  `MSFT 430 CALL @ 0.79 2 DTE`  (explicit DTE; analysis based on 2 DTE)
 
-Optional **EXP YYYY-MM-DD** or **EXP MM/DD/YYYY** in any play sets expiration and DTE (used for PoP and Polygon lookup). Include **0DTE**, **same day**, or **ODE** to trigger same-day rules (tighter stop, faster targets).
+Optional **EXP YYYY-MM-DD** or **EXP MM/DD/YYYY** in any play sets expiration and DTE from the date. Optional **DTE N** or **N DTE** sets DTE directly (single source of truth for the run). Include **0DTE**, **same day**, or **ODE** to trigger same-day rules when no explicit DTE/EXP is given.
 
 ## Example Output
 

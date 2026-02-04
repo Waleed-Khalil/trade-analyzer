@@ -159,5 +159,6 @@ alert_formats:
     fields: ["ticker", "strike", "type", "premium"]
     example: "QQQ 630 CALL @ .20"
 
-  # Optional: add " EXP YYYY-MM-DD" or " EXP MM/DD/YYYY" to any play for explicit DTE
+  # Optional: add " EXP YYYY-MM-DD" or " EXP MM/DD/YYYY" for DTE from date
+  # Optional: add " DTE N" or " N DTE" for explicit DTE (e.g. MSFT 430 CALL @ 0.79 DTE 2)
   # Example: QQQ 628 CALL @ .63 EXP 2026-02-06

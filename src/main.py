@@ -6,6 +6,7 @@ Supports ODE (same-day / 0DTE) with tighter risk parameters.
 
 import os
 import sys
+from datetime import date, timedelta
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,21 +26,31 @@ def _load_env(repo_root: str) -> None:
 
 
 def _parse_args(argv: list) -> tuple:
-    """Parse argv into (verbose, no_ai, no_market, play_parts)."""
+    """Parse argv into (verbose, no_ai, no_market, dte_override, play_parts)."""
     verbose = False
     no_ai = False
     no_market = False
+    dte_override = None
     rest = []
-    for arg in argv:
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
         if arg in ("--verbose", "-v"):
             verbose = True
         elif arg == "--no-ai":
             no_ai = True
         elif arg == "--no-market":
             no_market = True
+        elif arg in ("--dte", "-d") and i + 1 < len(argv):
+            try:
+                dte_override = max(0, int(argv[i + 1]))
+            except ValueError:
+                pass
+            i += 1
         else:
             rest.append(arg)
-    return verbose, no_ai, no_market, rest
+        i += 1
+    return verbose, no_ai, no_market, dte_override, rest
 
 
 def get_option_play_input(play_parts: list) -> str:
@@ -89,10 +100,10 @@ def main() -> None:
     config_path = os.path.join(repo_root, "config", "config.yaml")
     _load_env(repo_root)
 
-    verbose, no_ai, no_market, play_parts = _parse_args(sys.argv[1:])
+    verbose, no_ai, no_market, dte_override, play_parts = _parse_args(sys.argv[1:])
     play_text = get_option_play_input(play_parts)
     if not play_text:
-        print("No option play provided. Usage: python main.py [--verbose] [--no-ai] [--no-market] \"NVDA 150 CALL @ 2.50 0DTE\"")
+        print("No option play provided. Usage: python main.py [--verbose] [--no-ai] [--no-market] [--dte N] \"NVDA 150 CALL @ 2.50 0DTE\"")
         sys.exit(1)
 
     parser = TradeParser(config_path)
@@ -102,6 +113,24 @@ def main() -> None:
         for ex in _supported_formats(config_path):
             print(f"  {ex}")
         sys.exit(1)
+
+    # CLI --dte override: single source of truth for DTE (analysis uses this)
+    if dte_override is not None:
+        exp_date = (date.today() + timedelta(days=dte_override)).strftime("%Y-%m-%d")
+        trade = OptionTrade(
+            ticker=trade.ticker,
+            option_type=trade.option_type,
+            strike=trade.strike,
+            premium=trade.premium,
+            contracts=trade.contracts,
+            expiration=exp_date,
+            entry_price=trade.entry_price,
+            direction=trade.direction,
+            raw_message=trade.raw_message,
+            parsed_at=trade.parsed_at,
+            is_ode=(dte_override == 0),
+            days_to_expiration=dte_override,
+        )
 
     # Optional: fetch underlying (Yahoo), option (Polygon), news (Brave Search)
     current_price = None
@@ -142,6 +171,23 @@ def main() -> None:
                     market_context["minutes_to_close_et"] = mins
             if option_quote and (live := option_quote.get("last")) is not None:
                 market_context["premium_diff_pct"] = pasted_vs_live_premium_diff_pct(trade.premium, live)
+            # Break-even at expiration if not from Polygon (call: strike + premium, put: strike - premium)
+            if market_context.get("break_even_price") is None and trade.strike and trade.premium:
+                opt = (getattr(trade, "option_type", "CALL") or "CALL").upper()
+                if opt == "CALL":
+                    market_context["break_even_price"] = trade.strike + trade.premium
+                else:
+                    market_context["break_even_price"] = trade.strike - trade.premium
+            # Expected move (1 SD to expiration): spot * IV * sqrt(DTE/365)
+            dte_for_move = market_context.get("days_to_expiration")
+            iv_for_move = market_context.get("implied_volatility")
+            if current_price and iv_for_move is not None and dte_for_move is not None and dte_for_move >= 0:
+                import math
+                iv_dec = iv_for_move if iv_for_move <= 2 else iv_for_move / 100.0
+                t_years = max(dte_for_move / 365.0, 1 / 365.0)
+                expected_move_pct = iv_dec * math.sqrt(t_years)
+                market_context["expected_move_pct"] = expected_move_pct
+                market_context["expected_move_1sd"] = current_price * expected_move_pct
             # Probability of Profit (Black-Scholes) when we have IV, spot, and DTE
             dte = market_context.get("days_to_expiration")
             if current_price and trade.strike and market_context.get("implied_volatility") is not None:
@@ -194,6 +240,20 @@ def main() -> None:
             if verbose:
                 print(f"[verbose] Market data skipped: {e}", file=sys.stderr)
             # Run without market data; AI and rules still work
+    if not no_market and market_context.get("current_price") is None and trade.ticker:
+        print("  Warning: Underlying price not fetched (check network or try again).", file=sys.stderr)
+
+    # Event risk: earnings / ex-dividend within DTE window (yfinance)
+    if not no_market and trade.ticker:
+        try:
+            from market_data.market_data import get_events
+            dte = getattr(trade, "days_to_expiration", None)
+            dte = dte if dte is not None else 0
+            market_context["events"] = get_events(trade.ticker, dte)
+        except Exception as e:
+            if verbose:
+                print(f"[verbose] Events fetch skipped: {e}", file=sys.stderr)
+            market_context["events"] = {}
 
     # IV Rank & realized vol (historical IV from Polygon when available; realized from Yahoo)
     if not no_market and trade.ticker:
@@ -357,6 +417,30 @@ def main() -> None:
         except Exception as e:
             if verbose:
                 print(f"[verbose] Stress test block skipped: {e}", file=sys.stderr)
+
+    # 1-day theta-adjusted stress (flat and spot-move estimates; DTE >= 0)
+    if current_price and trade.premium and trade.strike:
+        try:
+            from analysis.greeks import theta_stress_1d
+            dte = market_context.get("days_to_expiration")
+            dte = dte if dte is not None else getattr(trade, "days_to_expiration", 0) or 0
+            g = market_context.get("greeks") or {}
+            theta = g.get("theta")
+            delta = g.get("delta")
+            premium = (option_quote.get("last") if option_quote else None) or trade.premium
+            theta_1d = theta_stress_1d(
+                current_premium=premium,
+                spot=current_price,
+                dte=dte,
+                theta=theta,
+                delta=delta,
+            )
+            if theta_1d is not None:
+                market_context["theta_stress_1d"] = theta_1d
+                market_context["theta_stress_1d_premium"] = premium
+        except Exception as e:
+            if verbose:
+                print(f"[verbose] Theta stress 1d skipped: {e}", file=sys.stderr)
 
     # Rule-based analysis (red/green flags, setup quality)
     analyzer = TradeAnalyzer(config_path)

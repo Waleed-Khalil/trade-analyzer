@@ -3,6 +3,7 @@ Market Data Module
 Fetch underlying price and rich context (yfinance) and optional news (Brave Search) for option analysis.
 """
 
+from datetime import date, datetime
 from typing import Optional, Dict, Any, List
 
 
@@ -207,3 +208,62 @@ def get_atr(
         return atr
     except Exception:
         return None
+
+
+def get_events(ticker: str, dte: int) -> Dict[str, Any]:
+    """
+    Fetch upcoming earnings and ex-dividend dates within the option's DTE window.
+    Uses yfinance. Returns dict of events: {'earnings': {'date': 'YYYY-MM-DD', 'days_to': n}, ...}
+    or {} if none in window / fetch fails. dte is days to expiration (0 = today).
+    """
+    events: Dict[str, Any] = {}
+    today = date.today()
+    window_end = dte + 1
+
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+
+        # Earnings: earliest future date within [0, dte+1] days (some sources show Apr 27/28/29 variants; we take soonest in window)
+        try:
+            cal = t.get_earnings_dates(limit=12)
+            if cal is not None and not cal.empty:
+                next_earnings: Optional[Dict[str, Any]] = None
+                for idx in cal.index:
+                    try:
+                        if hasattr(idx, "to_pydatetime"):
+                            ed = idx.to_pydatetime().date()
+                        elif hasattr(idx, "date"):
+                            ed = idx.date()
+                        else:
+                            continue
+                        days_to = (ed - today).days
+                        if 0 <= days_to <= window_end:
+                            if next_earnings is None or days_to < next_earnings["days_to"]:
+                                next_earnings = {"date": ed.strftime("%Y-%m-%d"), "days_to": days_to}
+                    except Exception:
+                        continue
+                if next_earnings:
+                    events["earnings"] = next_earnings
+        except Exception:
+            pass
+
+        # Dividend: exDividendDate from info (Unix timestamp)
+        try:
+            info = t.info
+            if isinstance(info, dict):
+                ex_ts = info.get("exDividendDate")
+                if ex_ts is not None:
+                    if isinstance(ex_ts, (int, float)):
+                        ex_dt = datetime.fromtimestamp(ex_ts)
+                        ex_d = ex_dt.date()
+                    else:
+                        continue
+                    days_to_div = (ex_d - today).days
+                    if 0 <= days_to_div <= window_end:
+                        events["dividend"] = {"date": ex_d.strftime("%Y-%m-%d"), "days_to": days_to_div}
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return events

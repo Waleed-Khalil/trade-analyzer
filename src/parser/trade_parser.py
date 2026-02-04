@@ -7,7 +7,7 @@ Supports optional EXP YYYY-MM-DD or EXP MM/DD/YYYY for explicit expiration.
 import re
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Tuple
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import yaml
 
 
@@ -62,12 +62,33 @@ class TradeParser:
         Try to parse a Discord message as an options alert.
         Returns OptionTrade if successful, None if no match.
         Optional: EXP YYYY-MM-DD or EXP MM/DD/YYYY sets expiration and DTE.
+        Optional: DTE N or N DTE sets days-to-expiration explicitly (single source of truth).
         """
         message = message.strip()
         for fmt in self.formats:
             try:
                 trade = self._try_format(message, fmt)
                 if trade:
+                    # 1) Explicit DTE in message (e.g. "DTE 2" or "2 DTE") — universal source
+                    explicit_dte = self._parse_explicit_dte(message)
+                    if explicit_dte is not None:
+                        exp_date = (date.today() + timedelta(days=explicit_dte)).strftime("%Y-%m-%d")
+                        trade = OptionTrade(
+                            ticker=trade.ticker,
+                            option_type=trade.option_type,
+                            strike=trade.strike,
+                            premium=trade.premium,
+                            contracts=trade.contracts,
+                            expiration=exp_date,
+                            entry_price=trade.entry_price,
+                            direction=trade.direction,
+                            raw_message=trade.raw_message,
+                            parsed_at=trade.parsed_at,
+                            is_ode=(explicit_dte == 0),
+                            days_to_expiration=explicit_dte,
+                        )
+                        return trade
+                    # 2) EXP date in message — DTE computed from (exp - today)
                     exp_date, dte = self._parse_expiration(message)
                     if exp_date is not None:
                         trade = OptionTrade(
@@ -146,6 +167,20 @@ class TradeParser:
         elif any(word in msg_lower for word in ['sell', 'short', 'put', 'bear']):
             return "SHORT"
         return "LONG"  # Default
+
+    def _parse_explicit_dte(self, message: str) -> Optional[int]:
+        """
+        Parse explicit DTE from message. Returns days (0 = today) or None.
+        Supports: DTE N, N DTE (e.g. DTE 2, 2 DTE). Case-insensitive.
+        """
+        msg = message.strip()
+        m = re.search(r"\bdte\s*(\d+)\b", msg, re.I)
+        if m:
+            return max(0, int(m.group(1)))
+        m = re.search(r"\b(\d+)\s*dte\b", msg, re.I)
+        if m:
+            return max(0, int(m.group(1)))
+        return None
 
     def _detect_ode(self, message: str) -> tuple:
         """Detect same-day expiration (0DTE/ODE). Returns (is_ode, days_to_expiration)."""

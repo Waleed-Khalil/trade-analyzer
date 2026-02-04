@@ -20,6 +20,7 @@ class AnalysisResult:
     setup_quality: str  # "high", "medium", "low"
     confidence: float  # 0.0 to 1.0
     setup_score: int = 0  # 0-100 weighted score; >75 suggests PLAY
+    score_breakdown: Optional[Dict[str, Any]] = None  # optional component breakdown for transparency
 
 
 class TradeAnalyzer:
@@ -76,7 +77,7 @@ class TradeAnalyzer:
         confidence = self._calculate_confidence(trade_plan, red_flags)
         
         # Weighted setup score 0-100 (40% rules/technicals, 30% Greeks, 20% sentiment proxy, 10% liquidity)
-        setup_score = self._calculate_setup_score(
+        setup_score, score_breakdown = self._calculate_setup_score(
             trade, trade_plan, red_flags, green_flags, market_context
         )
         
@@ -88,6 +89,7 @@ class TradeAnalyzer:
             setup_quality=setup_quality,
             confidence=confidence,
             setup_score=setup_score,
+            score_breakdown=score_breakdown,
         )
 
     def _check_red_flags(
@@ -155,14 +157,15 @@ class TradeAnalyzer:
                 "message": f"Underlying down {abs(five_d):.1f}% in 5d - weak momentum"
             })
 
-        # Pasted premium vs live differs a lot (stale alert)
+        # Pasted premium vs live differs (stale alert): flag at 15%, high severity if >25%
         diff_pct = ctx.get("premium_diff_pct")
-        if diff_pct is not None and abs(diff_pct) > 20:
+        if diff_pct is not None and abs(diff_pct) > 15:
             direction = "higher" if diff_pct > 0 else "lower"
+            severity = "high" if abs(diff_pct) > 25 else "medium"
             flags.append({
                 "type": "stale_premium",
-                "severity": "medium",
-                "message": f"Live option price is {abs(diff_pct):.0f}% {direction} than pasted - alert may be stale"
+                "severity": severity,
+                "message": f"Live option price is {abs(diff_pct):.0f}% {direction} than pasted - re-verify live quotes"
             })
 
         # DTE < 1 (same-day / very short) - HIGH RISK
@@ -173,6 +176,26 @@ class TradeAnalyzer:
                 "severity": "high",
                 "message": "DTE < 1 - HIGH RISK; consider further OTM for leverage or longer DTE"
             })
+
+        # Event risk: earnings (high) or ex-dividend (medium) within 2 days
+        events = ctx.get("events") or {}
+        for event_type, details in events.items():
+            if not isinstance(details, dict) or details.get("days_to", 99) > 2:
+                continue
+            days_to = details.get("days_to", 0)
+            day_word = "day" if days_to == 1 else "days"
+            if event_type == "earnings":
+                flags.append({
+                    "type": "event_risk",
+                    "severity": "high",
+                    "message": f"High event risk: earnings in {days_to} {day_word} - expect vol spike, IV crush post-event",
+                })
+            else:
+                flags.append({
+                    "type": "event_risk",
+                    "severity": "medium",
+                    "message": f"Ex-dividend in {days_to} {day_word} - minor downside pressure (price drop ~dividend)",
+                })
 
         # Greeks & probabilities (config: analysis.greeks)
         greeks_cfg = self.analysis_config.get("greeks", {})
@@ -192,6 +215,17 @@ class TradeAnalyzer:
                 "severity": "medium",
                 "message": f"Theta {theta:.4f} - premium erodes quickly (high time decay)"
             })
+        # High theta risk for short DTE: est. % decay if flat tomorrow
+        dte = ctx.get("days_to_expiration")
+        premium = getattr(trade, "premium", None) or 0.01
+        if theta is not None and premium > 0 and dte is not None and dte <= 3:
+            decay_pct = abs(theta) / premium * 100
+            if decay_pct > 20:
+                flags.append({
+                    "type": "theta_risk",
+                    "severity": "medium",
+                    "message": f"High theta risk: est. -{decay_pct:.0f}% if flat tomorrow",
+                })
         vega = (ctx.get("greeks") or {}).get("vega")
         vega_thresh = greeks_cfg.get("vega_high", 0.20)
         if vega is not None and vega > vega_thresh:
@@ -345,37 +379,43 @@ class TradeAnalyzer:
         red_flags: List,
         green_flags: List,
         market_context: Optional[Dict[str, Any]] = None,
-    ) -> int:
+    ) -> tuple:
         """
         Weighted setup score 0-100. Threshold >75 for PLAY.
-        Rough weights: 40% rule compliance/momentum, 30% Greeks/PoP, 20% sentiment proxy, 10% liquidity.
+        Returns (score, breakdown_dict) for transparency.
         """
         ctx = market_context or {}
         base = 70
-        # Rule compliance (part of "technicals")
+        rules = 0
         if trade_plan.go_no_go == "GO":
-            base += 10
-        # Green flags
-        base += min(len(green_flags) * 3, 15)
-        # Red flags: high -12, medium -6
+            rules = 10
+            base += rules
+        greens = min(len(green_flags) * 3, 15)
+        base += greens
+        reds = 0
         for f in red_flags:
             if f.get("severity") == "high":
+                reds -= 12
                 base -= 12
             elif f.get("severity") == "medium":
+                reds -= 6
                 base -= 6
-        # Greeks: PoP >= 60% +5
+        pop_adj = 0
         pop = ctx.get("probability_of_profit")
         if pop is not None and pop >= 0.60:
+            pop_adj = 5
             base += 5
         elif pop is not None and pop < 0.50:
+            pop_adj = -5
             base -= 5
-        # Liquidity: OI and volume above min = +3
+        liquidity = 0
         greeks_cfg = self.analysis_config.get("greeks", {})
         oi_min = greeks_cfg.get("open_interest_min", 1000)
         vol_min = greeks_cfg.get("option_volume_min", 500)
         if ctx.get("open_interest", 0) >= oi_min and ctx.get("option_volume", 0) >= vol_min:
+            liquidity = 3
             base += 3
-        # Technical confluence: RSI + price vs SMA + MACD
+        technical = 0
         tech_cfg = self.analysis_config.get("technical", {})
         if tech_cfg.get("enabled", False):
             tech = ctx.get("technical", {})
@@ -389,11 +429,44 @@ class TradeAnalyzer:
             rsi_max_bear = tech_cfg.get("rsi_max_bearish", 50)
             if opt_type == "CALL" and rsi is not None and price_above_sma20 and (macd_bullish is True or macd_bullish is None):
                 if rsi >= rsi_min_bull:
+                    technical = bonus
                     base += bonus
             elif opt_type == "PUT" and rsi is not None and price_above_sma20 is False and (macd_bullish is False or macd_bullish is None):
                 if rsi <= rsi_max_bear:
+                    technical = bonus
                     base += bonus
-        return max(0, min(100, int(base)))
+        events_adj = 0
+        events_dict = ctx.get("events") or {}
+        for etype, details in events_dict.items():
+            if not isinstance(details, dict) or details.get("days_to", 99) > 2:
+                continue
+            if etype == "earnings":
+                events_adj -= 10
+                base -= 10
+            else:
+                events_adj -= 5
+                base -= 5
+        theta_risk_adj = 0
+        dte = ctx.get("days_to_expiration")
+        theta = (ctx.get("greeks") or {}).get("theta")
+        prem = getattr(trade, "premium", None) or 0.01
+        if dte is not None and dte <= 2 and theta is not None and prem > 0:
+            if abs(theta) / prem >= 0.20:
+                theta_risk_adj = -6
+                base -= 6
+        score = max(0, min(100, int(base)))
+        breakdown = {
+            "base": 70,
+            "rules": rules,
+            "greens": greens,
+            "reds": reds,
+            "pop": pop_adj,
+            "liquidity": liquidity,
+            "technical": technical,
+            "events": events_adj,
+            "theta_risk": theta_risk_adj,
+        }
+        return score, breakdown
 
 
 # CLI test
