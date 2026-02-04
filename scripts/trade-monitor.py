@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-0DTE Trade Monitor v2
-Enhanced with smart exit logic, momentum detection, and reversal alerts.
+0DTE Trade Monitor v2.1
+Enhanced with smart exit logic, momentum detection, reversal alerts, and Telegram integration.
 """
 
 import os
@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from market_data.market_data import get_market_context
 from parser.trade_parser import TradeParser
+from scripts.telegram_alerts import send_telegram_alert, should_send_alert
 
 
 # Configuration
@@ -413,6 +414,9 @@ def main():
                 for alert in high_urgency:
                     print(f"  {alert['type']}: {alert['message']}")
                     all_alerts.append({**alert, "trade_id": trade_id})
+                    
+                    # Send to Telegram (commented out until configured)
+                    # send_alert_to_telegram(alert, trade)
             
         except Exception as e:
             print(f"Error monitoring {trade_id}: {e}")
@@ -434,6 +438,35 @@ def main():
             summary = generate_summary(trade, prices, option_pnl)
             print(summary)
             print()
+
+
+def send_alert_to_telegram(alert_data, trade_data):
+    """
+    Send alert to Telegram via Clawdbot message tool.
+    Returns True if sent, False if rate limited.
+    """
+    from scripts.telegram_alerts import send_telegram_alert, should_send_alert
+    
+    trade_id = f"{trade_data['ticker']}_{trade_data['strike']}_{trade_data['type']}"
+    urgency = alert_data.get("urgency", "medium")
+    
+    # Check rate limiting
+    if not should_send_alert(trade_id, alert_data["type"], urgency):
+        return False
+    
+    # Format the alert
+    message = send_telegram_alert(alert_data, trade_data)
+    
+    # Log the alert
+    log_file = PROJECT_ROOT / "logs" / "telegram_alerts.log"
+    with open(log_file, "a") as f:
+        f.write(f"[{datetime.now().isoformat()}] {alert_data['type']}: {alert_data['message']}\n")
+    
+    # In a full implementation, this would use the Clawdbot message tool:
+    # message.send(channel="telegram", message=message)
+    
+    print(f"\n📱 TELEGRAM: {message}\n")
+    return True
 
 
 if __name__ == "__main__":
