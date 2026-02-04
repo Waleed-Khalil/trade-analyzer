@@ -7,3 +7,7 @@ venv/
 .coverage
 htmlcov/
 logs/
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/

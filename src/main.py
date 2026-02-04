@@ -7,6 +7,7 @@ Supports ODE (same-day / 0DTE) with tighter risk parameters.
 import os
 import sys
 from datetime import date, timedelta
+from typing import Optional
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -122,26 +123,27 @@ def _rule_based_recommendation(trade, trade_plan):
     return RuleRecommendation()
 
 
-def main() -> None:
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    config_path = os.path.join(repo_root, "config", "config.yaml")
-    _load_env(repo_root)
-
-    verbose, no_ai, no_market, dte_override, play_parts = _parse_args(sys.argv[1:])
-    play_text = get_option_play_input(play_parts)
-    if not play_text:
-        print("No option play provided. Usage: python main.py [--verbose] [--no-ai] [--no-market] [--dte N] \"NVDA 150 CALL @ 2.50 0DTE\"")
-        sys.exit(1)
-
+def run_analysis(
+    play_text: str,
+    config_path: str,
+    no_ai: bool = False,
+    no_market: bool = False,
+    dte_override: Optional[int] = None,
+    verbose: bool = False,
+):
+    """
+    Run full analysis pipeline. Returns a dict:
+    - On parse failure: {"ok": False, "error": str, "supported_formats": list}
+    - On success: {"ok": True, "trade", "trade_plan", "analysis", "recommendation", "market_context", "current_price", "option_quote"}
+    """
     parser = TradeParser(config_path)
     trade = parser.parse(play_text)
     if not trade:
-        print("Could not parse the option play. Supported formats:")
-        for ex in _supported_formats(config_path):
-            print(f"  {ex}")
-        sys.exit(1)
-
-    # CLI --dte override: single source of truth for DTE (analysis uses this)
+        return {
+            "ok": False,
+            "error": "Could not parse the option play.",
+            "supported_formats": _supported_formats(config_path),
+        }
     if dte_override is not None:
         exp_date = (date.today() + timedelta(days=dte_override)).strftime("%Y-%m-%d")
         trade = OptionTrade(
@@ -158,8 +160,6 @@ def main() -> None:
             is_ode=(dte_override == 0),
             days_to_expiration=dte_override,
         )
-
-    # Optional: fetch underlying (Yahoo), option (Massive), news (Brave Search)
     current_price = None
     market_context = {}
     news_context = []
@@ -563,6 +563,44 @@ def main() -> None:
                 support_resistance = getattr(recommendation, "support_resistance", [])
                 ode_risks = getattr(recommendation, "ode_risks", [])
             recommendation = OverrideRecommendation()
+
+    return {
+        "ok": True,
+        "trade": trade,
+        "trade_plan": trade_plan,
+        "analysis": analysis,
+        "recommendation": recommendation,
+        "market_context": market_context,
+        "current_price": current_price,
+        "option_quote": option_quote,
+    }
+
+
+def main() -> None:
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    config_path = os.path.join(repo_root, "config", "config.yaml")
+    _load_env(repo_root)
+
+    verbose, no_ai, no_market, dte_override, play_parts = _parse_args(sys.argv[1:])
+    play_text = get_option_play_input(play_parts)
+    if not play_text:
+        print("No option play provided. Usage: python main.py [--verbose] [--no-ai] [--no-market] [--dte N] \"NVDA 150 CALL @ 2.50 0DTE\"")
+        sys.exit(1)
+
+    result = run_analysis(play_text, config_path, no_ai, no_market, dte_override, verbose)
+    if not result["ok"]:
+        print(result["error"])
+        for ex in result.get("supported_formats", []):
+            print(f"  {ex}")
+        sys.exit(1)
+
+    trade = result["trade"]
+    trade_plan = result["trade_plan"]
+    analysis = result["analysis"]
+    recommendation = result["recommendation"]
+    market_context = result["market_context"]
+    current_price = result["current_price"]
+    option_quote = result["option_quote"]
 
     # Log PLAY signals to journal when enabled (min_score_to_log from config)
     rec = getattr(recommendation, "recommendation", "")

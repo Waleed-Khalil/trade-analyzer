@@ -62,6 +62,26 @@ python src/main.py
 Example: `python src/main.py --no-ai --no-market "AAPL CALL 215 @ 3.50"`  
 Example with DTE: `python src/main.py --dte 2 "MSFT 430 CALL @ 0.79"`
 
+## Web Frontend
+
+A **Next.js 14** frontend provides a single-page UI: paste a play, click **Analyze**, and see the full report (verdict, Greeks, stress test, red flags, setup quality) in a dashboard.
+
+1. **Start the API** (from repo root):
+
+   ```bash
+   python -m uvicorn src.api.server:app --host 0.0.0.0 --port 8000
+   ```
+
+   If port 8000 is in use, use another port (e.g. `--port 8001`) and set `NEXT_PUBLIC_API_URL=http://localhost:8001` in `frontend/.env.local`.
+
+2. **Start the frontend**:
+
+   ```bash
+   cd frontend && npm install && npm run dev
+   ```
+
+   Open [http://localhost:3000](http://localhost:3000). Set `NEXT_PUBLIC_API_URL` in `frontend/.env.local` if the API is not on `http://localhost:8000`. See [frontend/README.md](frontend/README.md) for details.
+
 ## DTE (Days to Expiration) — Universal Input
 
 DTE drives all time-sensitive logic: ODE vs standard rules, stop/target multipliers, PoP, and stress tests. You can set it in two ways:

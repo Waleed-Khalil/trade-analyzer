@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0b0f14;
+  --card: #151c26;
+  --border: #1e293b;
+  --play: #10b981;
+  --dont: #f59e0b;
+  --muted: #64748b;
+}
+
+body {
+  background: var(--bg);
+  color: #e2e8f0;
+  min-height: 100vh;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
