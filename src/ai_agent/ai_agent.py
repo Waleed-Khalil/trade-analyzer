@@ -245,6 +245,82 @@ class OptionAIAgent:
         if atr_stop is not None:
             mc_lines.append(f"ATR STOP: ${atr_stop:.2f}")
 
+        # Expected move & required move to break-even
+        exp_move_1sd = _safe_float(market_context.get("expected_move_1sd"))
+        exp_move_pct = _safe_float(market_context.get("expected_move_pct"))
+        if exp_move_1sd is not None and exp_move_pct is not None:
+            mc_lines.append(f"EXPECTED MOVE (1 SD to exp): ${exp_move_1sd:.2f} ({exp_move_pct:.1%})")
+        req_move = _safe_float(market_context.get("required_move_pct"))
+        req_per_day = _safe_float(market_context.get("required_move_per_day_pct"))
+        if req_move is not None:
+            mc_lines.append(f"REQUIRED MOVE TO BREAK-EVEN: {req_move:.1%}" + (f" ({req_per_day:.1%}/day)" if req_per_day is not None else ""))
+
+        # Scenario probabilities (prob underlying at/beyond +/-1%, +/-2% by exp); list of (pct, prob)
+        scenario_probs = market_context.get("scenario_probs")
+        if scenario_probs and isinstance(scenario_probs, list):
+            parts = []
+            for pct, prob in scenario_probs:
+                p_f = _safe_float(pct)
+                prob_f = _safe_float(prob)
+                if p_f is not None and prob_f is not None:
+                    parts.append(f"{p_f * 100:+.0f}%: {prob_f:.0%}")
+            if parts:
+                mc_lines.append("SCENARIO PROBS (by exp): " + " | ".join(parts))
+
+        # Event risk (earnings, ex-dividend)
+        events = market_context.get("events") or {}
+        if events and isinstance(events, dict):
+            event_parts = []
+            for etype, details in events.items():
+                if isinstance(details, dict):
+                    days_to = details.get("days_to")
+                    date_str = details.get("date") or ""
+                    if days_to is not None:
+                        event_parts.append(f"{etype}: {days_to} day(s) away" + (f" ({date_str})" if date_str else ""))
+            if event_parts:
+                mc_lines.append("EVENT RISK: " + "; ".join(event_parts))
+        else:
+            mc_lines.append("EVENT RISK: N/A - no major catalysts in DTE window")
+
+        # 1-day hold estimates (theta-adjusted); list of (label, est_premium, pct_change)
+        theta_1d = market_context.get("theta_stress_1d")
+        if theta_1d and isinstance(theta_1d, list):
+            parts = []
+            for item in theta_1d:
+                if isinstance(item, (list, tuple)) and len(item) >= 3:
+                    label, est_prem, pct_chg = item[0], _safe_float(item[1]), _safe_float(item[2])
+                    if est_prem is not None:
+                        parts.append(f"{label}: ${est_prem:.2f}" + (f" ({pct_chg:+.1f}%)" if pct_chg is not None else ""))
+            if parts:
+                mc_lines.append("1-DAY HOLD ESTIMATES (theta-adjusted): " + " | ".join(parts))
+
+        # Liquidity (OI & option volume)
+        oi = market_context.get("open_interest")
+        opt_vol = market_context.get("option_volume")
+        if oi is not None or opt_vol is not None:
+            mc_lines.append("LIQUIDITY: OI " + (f"{oi:,}" if oi is not None else "N/A") + " | Vol " + (f"{opt_vol:,}" if opt_vol is not None else "N/A"))
+
+        # Bid/Ask and spread (from Quotes API)
+        oq = market_context.get("option_quote") or {}
+        if oq.get("bid_price") is not None or oq.get("ask_price") is not None:
+            bid = _safe_float(oq.get("bid_price"))
+            ask = _safe_float(oq.get("ask_price"))
+            parts = []
+            if bid is not None:
+                parts.append(f"Bid ${bid:.2f}")
+            if ask is not None:
+                parts.append(f"Ask ${ask:.2f}")
+            spread_pct = _safe_float(oq.get("spread_pct_of_mid"))
+            if spread_pct is not None:
+                parts.append(f"Spread {spread_pct:.0f}% of mid")
+            if parts:
+                mc_lines.append("OPTION QUOTE: " + " | ".join(parts))
+
+        # Market status (open/closed/extended-hours)
+        ms = market_context.get("market_status") or {}
+        if ms.get("market"):
+            mc_lines.append(f"MARKET STATUS: {ms['market']}")
+
         mc_str = "\n".join(mc_lines)
 
         # News
@@ -265,6 +341,13 @@ class OptionAIAgent:
             diff = abs(premium_diff_val)
             if diff > 50:
                 stale_warning = "\n⚠️ PASTED PREMIUM DIFFERS >50% FROM LIVE - ALERT LIKELY STALE"
+
+        r_val = _safe_float(getattr(trade_plan, "target_1_r", None))
+        r_val = f"{r_val:.1f}".rstrip("0").rstrip(".") if r_val is not None else "N/A"
+        pos = getattr(trade_plan, "position", None)
+        max_risk_str = f"{pos.max_risk_dollars:.0f}" if pos is not None and getattr(pos, "max_risk_dollars", None) is not None else "N/A"
+        max_gain = getattr(trade_plan, "max_gain_dollars", None)
+        max_gain_str = f"{max_gain:.0f}" if isinstance(max_gain, (int, float)) else "N/A"
 
         return f"""You are an expert options trader and analyst. Your job is to provide a DEEP, COMPREHENSIVE analysis of this option trade.
 
@@ -290,11 +373,13 @@ MARKET DATA
 RULE-BASED PLAN
 ═══════════════════════════════════════════════════════════════
 DECISION: {getattr(trade_plan, 'go_no_go', 'N/A')}
+R:R at T1: 1:{r_val}
+MAX LOSS (at stop): ${max_risk_str}
+MAX GAIN at T1: ${max_gain_str}
 STOP: ${getattr(trade_plan, 'stop_loss', 'N/A')} ({getattr(trade_plan, 'stop_risk_pct', 'N/A')}% of premium)
 TARGET 1: ${getattr(trade_plan, 'target_1', 'N/A')} ({getattr(trade_plan, 'target_1_r', 'N/A')}R)
 RUNNER: {getattr(trade_plan, 'runner_contracts', 'N/A')} @ ${getattr(trade_plan, 'runner_target', 'N/A')}
 CONTRACTS: {getattr(trade_plan.position, 'contracts', 'N/A') if hasattr(trade_plan, 'position') else 'N/A'}
-MAX RISK: ${getattr(trade_plan.position, 'max_risk_dollars', 'N/A') if hasattr(trade_plan, 'position') else 'N/A'}
 
 ═══════════════════════════════════════════════════════════════
 OUTPUT FORMAT - BE VERY DETAILED
@@ -434,13 +519,12 @@ ODE RISKS (if 0DTE):
         max_gain_str = f"${max_gain:.0f}" if isinstance(max_gain, (int, float)) else "N/A"
         return RecommendationResult(
             recommendation=getattr(trade_plan, 'go_no_go', 'GO'),
-            reasoning=f"""Rule-based analysis with {stale_warning}. 
-            
+            reasoning=f"""Rule-based analysis{f' with {stale_warning}' if stale_warning else ''}.
+
 Primary factors: Position size ({getattr(trade_plan.position, 'contracts', 'N/A')} contracts) and max risk ({max_risk_str}).
 Technicals: RSI {rsi_str}, underlying 5d return {five_d_str}.
 IV Rank: {iv_rank:.0f}% - {'low IV = favorable for buys' if iv_rank < 30 else 'high IV = caution on longs' if iv_rank > 70 else 'moderate IV'}.
-
-{stale_warning}""",
+{f'{stale_warning}' if stale_warning else ''}""",
             risk_assessment=f"""MAX LOSS: {max_risk_str} if stop at ${trade_plan.stop_loss} is hit.
 MAX GAIN: ~{max_gain_str} if target at ${trade_plan.target_1} is hit ({trade_plan.target_1_r}R).
 PROBABILITY: Based on {'low IV' if iv_rank < 30 else 'high IV' if iv_rank > 70 else 'moderate'} volatility environment.""",

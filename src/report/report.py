@@ -34,6 +34,27 @@ def print_analysis_report(
         print(f"  Expiration: {exp}" + (f" ({dte} DTE)" if dte is not None else ""))
     if is_ode:
         print("  Same-day expiration (0DTE) - tighter stops and targets apply.")
+    # One-line summary
+    ctx_summary = market_context or {}
+    rec = getattr(recommendation, "recommendation", getattr(trade_plan, "go_no_go", ""))
+    summary_parts = []
+    if dte is not None:
+        summary_parts.append(f"{dte} DTE")
+    summary_parts.append(ctx_summary.get("moneyness_label", "option") or "option")
+    pop_s = ctx_summary.get("probability_of_profit")
+    if pop_s is not None:
+        summary_parts.append(f"PoP {pop_s:.0%}")
+    g = ctx_summary.get("greeks") or {}
+    prem = getattr(trade, "premium", 0) or 0.01
+    theta_s = g.get("theta")
+    if theta_s is not None and prem > 0:
+        decay = abs(theta_s) / prem * 100
+        summary_parts.append(f"Theta ~{decay:.0f}%/day")
+    r_mult = getattr(trade_plan, "target_1_r", None)
+    if r_mult is not None:
+        summary_parts.append(f"R:R 1:{r_mult:.1f}")
+    summary_parts.append("[PLAY]" if rec in ("PLAY", "GO") else "[DON'T PLAY]")
+    print("  " + " | ".join(summary_parts))
     print()
 
     # ============================================================
@@ -58,20 +79,56 @@ def print_analysis_report(
     if option_live_price is not None:
         pasted = getattr(trade, "premium", None)
         diff = ctx.get("premium_diff_pct")
-        line = f"  Option (live): ${option_live_price:.2f} (Polygon)"
+        line = f"  Option (live): ${option_live_price:.2f} (Massive)"
         if pasted:
             line += f" | Pasted: ${pasted:.2f}"
         if diff is not None:
             line += f" | Diff: {diff:+.0f}%"
         print(line)
+        # Bid/Ask and Last Trade from Quotes + Last Trade APIs
+        oq = ctx.get("option_quote")
+        if oq and (oq.get("bid_price") is not None or oq.get("ask_price") is not None):
+            bid = oq.get("bid_price")
+            ask = oq.get("ask_price")
+            parts = []
+            if bid is not None:
+                parts.append(f"Bid ${bid:.2f}")
+            if ask is not None:
+                parts.append(f"Ask ${ask:.2f}")
+            if oq.get("spread") is not None and oq.get("spread_pct_of_mid") is not None:
+                parts.append(f"Spread ${oq['spread']:.2f} ({oq['spread_pct_of_mid']:.0f}% of mid)")
+            if parts:
+                print("  " + " | ".join(parts))
+        lt = ctx.get("option_last_trade")
+        if lt and lt.get("price") is not None:
+            age = ""
+            if lt.get("sip_timestamp") is not None:
+                import time
+                ns = lt["sip_timestamp"]
+                age_sec = max(0, (time.time_ns() - ns) // 1_000_000_000)
+                if age_sec < 60:
+                    age = f" ({age_sec}s ago)"
+                else:
+                    age = f" ({age_sec // 60}m ago)"
+            print(f"  Last trade: ${lt['price']:.2f}" + (f" x{lt['size']}" if lt.get("size") is not None else "") + age)
     else:
         print("  Option: pasted value only")
+
+    ms = ctx.get("market_status") or {}
+    if ms.get("market"):
+        print(f"  Market: {ms['market']}")
     
     if ctx.get("moneyness_label"):
         print(f"  Strike: {ctx['moneyness_label']}")
     be = ctx.get("break_even_price")
     if be is not None:
         print(f"  Break-even (exp): ${be:.2f}")
+    req_pct = ctx.get("required_move_pct")
+    req_per_day = ctx.get("required_move_per_day_pct")
+    dte_d = getattr(trade, "days_to_expiration", None)
+    if req_pct is not None and dte_d is not None and dte_d > 0 and req_per_day is not None:
+        sign = "+" if req_pct >= 0 else ""
+        print(f"  Required: {sign}{req_pct * 100:.1f}% by exp (~{req_per_day * 100:.1f}%/day)")
     if ctx.get("five_d_return_pct") is not None:
         sign = "+" if ctx["five_d_return_pct"] >= 0 else ""
         print(f"  5d Return: {sign}{ctx['five_d_return_pct']:.1f}%")
@@ -160,6 +217,12 @@ def print_analysis_report(
         if exp_move is not None and current_price:
             pct = (exp_pct * 100) if exp_pct is not None else (exp_move / current_price * 100)
             print(f"  Expected move (1 SD to exp): ${exp_move:.2f} ({pct:.1f}%)")
+        scenario_probs = ctx.get("scenario_probs")
+        if scenario_probs:
+            probs_str = " | ".join(
+                f"{pct * 100:+.0f}%: {prob:.0%}" for pct, prob in scenario_probs
+            )
+            print(f"  Prob move by exp (IV): {probs_str}")
         if iv_rank is not None:
             if iv_rank >= 80:
                 print("  -> High IV = overpriced options, IV crush risk on long")
@@ -272,10 +335,10 @@ def print_analysis_report(
         print(sub)
         for line in risk_assess.strip().split("\n"):
             line = line.strip()
-            if line.startswith("-"):
+            if line:
                 print(f"  {line}")
         print()
-    
+
     # Entry Criteria
     entry = getattr(recommendation, "entry_criteria", "")
     if entry:
@@ -283,10 +346,10 @@ def print_analysis_report(
         print(sub)
         for line in entry.strip().split("\n"):
             line = line.strip()
-            if line.startswith("-"):
+            if line:
                 print(f"  {line}")
         print()
-    
+
     # Exit Strategy
     exit_strat = getattr(recommendation, "exit_strategy", "")
     if exit_strat:
@@ -294,10 +357,10 @@ def print_analysis_report(
         print(sub)
         for line in exit_strat.strip().split("\n"):
             line = line.strip()
-            if line.startswith("-"):
+            if line:
                 print(f"  {line}")
         print()
-    
+
     # Market Context
     market_ctx = getattr(recommendation, "market_context", "")
     if market_ctx:
@@ -305,7 +368,7 @@ def print_analysis_report(
         print(sub)
         for line in market_ctx.strip().split("\n"):
             line = line.strip()
-            if line.startswith("-"):
+            if line:
                 print(f"  {line}")
         print()
 
@@ -316,6 +379,19 @@ def print_analysis_report(
     print(sub)
     print(f"  Position: {trade_plan.position.contracts} contracts")
     print(f"  Risk: ${trade_plan.position.max_risk_dollars:.0f} ({trade_plan.position.risk_percentage:.1%})")
+    r_mult = getattr(trade_plan, "target_1_r", None)
+    if r_mult is not None:
+        print(f"  R:R at T1: 1:{r_mult:.1f}")
+    prem = getattr(trade, "premium", 0)
+    sl = getattr(trade_plan, "stop_loss", 0)
+    t1 = getattr(trade_plan, "target_1", 0)
+    contracts = getattr(trade_plan.position, "contracts", 1)
+    if prem and sl < prem:
+        max_loss = (prem - sl) * contracts * 100
+        print(f"  Max loss (at stop): ${max_loss:.0f}")
+    if t1 and prem:
+        max_gain_t1 = (t1 - prem) * contracts * 100
+        print(f"  Max gain at T1: ${max_gain_t1:.0f}")
     print(f"  Entry: {trade_plan.entry_zone}")
     print(f"  Decision: {trade_plan.go_no_go}")
     if trade_plan.go_no_go_reasons:

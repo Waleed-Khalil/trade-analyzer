@@ -1,6 +1,7 @@
 """
-Polygon.io client for options: contract lookup, OHLC, and Option Chain Snapshot (greeks, IV, break-even).
-Uses: /v3/reference/options/contracts, /v3/snapshot/options/{underlying}, /v2/aggs/.../prev, /v1/open-close/...
+Massive (options data) client: contract lookup, OHLC, Option Chain Snapshot, Quotes, Last Trade, Market Status.
+Uses: /v3/reference/options/contracts, /v3/snapshot/options/{underlying}, /v2/aggs/.../prev, /v1/open-close/...,
+/v3/quotes/{optionsTicker}, /v2/last/trade/{optionsTicker}, /v1/marketstatus/now.
 """
 
 import os
@@ -15,15 +16,16 @@ try:
 except ImportError:
     pass
 
-BASE_URL = "https://api.polygon.io"
+BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.massive.com")
 
 
 def _get_api_key() -> Optional[str]:
-    return os.getenv("POLYGON_API_KEY")
+    # Polygon and Massive use the same API key; either env var works.
+    return os.getenv("MASSIVE_API_KEY") or os.getenv("POLYGON_API_KEY")
 
 
 def _request(path: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    """GET request to Polygon API. Adds apiKey. Returns JSON or None."""
+    """GET request to Massive API. Adds apiKey. Returns JSON or None."""
     key = _get_api_key()
     if not key:
         return None
@@ -50,7 +52,7 @@ def get_option_contract_ticker(
     expiration_date: str,
 ) -> Optional[str]:
     """
-    Resolve option contract ticker from Polygon (e.g. O:AAPL250202C00215000).
+    Resolve option contract ticker from Massive (e.g. O:AAPL250202C00215000).
     expiration_date: YYYY-MM-DD.
     contract_type: 'call' or 'put'.
     Returns options ticker string or None.
@@ -249,13 +251,98 @@ def get_option_historical_aggs(
     return out if out else None
 
 
+def get_option_quotes_latest(options_ticker: str) -> Optional[Dict[str, Any]]:
+    """
+    GET /v3/quotes/{optionsTicker} - latest quote (bid/ask) for the option.
+    Params: limit=1, sort=sip_timestamp, order=desc.
+    Returns dict with: bid_price, ask_price, bid_size, ask_size, spread, spread_pct_of_mid, sip_timestamp; or None.
+    """
+    if not options_ticker:
+        return None
+    path = f"/v3/quotes/{options_ticker}"
+    payload = _request(path, params={"limit": 1, "sort": "sip_timestamp", "order": "desc"})
+    if not payload or payload.get("status") != "OK":
+        return None
+    results = payload.get("results") or []
+    if not results:
+        return None
+    r = results[0]
+    bid = r.get("bid_price")
+    ask = r.get("ask_price")
+    if bid is None and ask is None:
+        return None
+    bid = float(bid) if bid is not None else None
+    ask = float(ask) if ask is not None else None
+    out: Dict[str, Any] = {}
+    if bid is not None:
+        out["bid_price"] = bid
+    if ask is not None:
+        out["ask_price"] = ask
+    if r.get("bid_size") is not None:
+        out["bid_size"] = int(r["bid_size"])
+    if r.get("ask_size") is not None:
+        out["ask_size"] = int(r["ask_size"])
+    if r.get("sip_timestamp") is not None:
+        out["sip_timestamp"] = int(r["sip_timestamp"])
+    if bid is not None and ask is not None:
+        spread = ask - bid
+        mid = (bid + ask) / 2.0
+        out["spread"] = round(spread, 4)
+        out["spread_pct_of_mid"] = round((spread / mid * 100.0), 1) if mid else None
+    return out if out else None
+
+
+def get_option_last_trade(options_ticker: str) -> Optional[Dict[str, Any]]:
+    """
+    GET /v2/last/trade/{optionsTicker} - latest trade for the option.
+    Returns dict with: price (p), size (s), sip_timestamp (t, nanoseconds); or None.
+    """
+    if not options_ticker:
+        return None
+    path = f"/v2/last/trade/{options_ticker}"
+    payload = _request(path)
+    if not payload or payload.get("status") != "OK":
+        return None
+    r = payload.get("results")
+    if not r or r.get("p") is None:
+        return None
+    out: Dict[str, Any] = {"price": float(r["p"])}
+    if r.get("s") is not None:
+        out["size"] = int(r["s"])
+    if r.get("t") is not None:
+        out["sip_timestamp"] = int(r["t"])
+    return out
+
+
+def get_market_status() -> Optional[Dict[str, Any]]:
+    """
+    GET /v1/marketstatus/now - current market open/closed/extended-hours.
+    Returns dict with: market, earlyHours, afterHours, serverTime, exchanges; or None.
+    """
+    payload = _request("/v1/marketstatus/now")
+    if not payload:
+        return None
+    out: Dict[str, Any] = {}
+    if payload.get("market") is not None:
+        out["market"] = payload["market"]
+    if payload.get("earlyHours") is not None:
+        out["early_hours"] = payload["earlyHours"]
+    if payload.get("afterHours") is not None:
+        out["after_hours"] = payload["afterHours"]
+    if payload.get("serverTime") is not None:
+        out["server_time"] = payload["serverTime"]
+    if payload.get("exchanges") is not None:
+        out["exchanges"] = payload["exchanges"]
+    return out if out else None
+
+
 def get_option_live_price(trade: Any) -> Optional[Dict[str, Any]]:
     """
     Get latest option price and, when available, greeks/IV/break-even from Polygon.
     - If trade has expiration (e.g. from EXP 2026-02-06): use that date.
     - ODE / 0DTE: exact expiration = today.
     - Else: nearest-term contract on or after today.
-    Tries Option Chain Snapshot first (greeks, IV, break_even); falls back to prev/open-close for price.
+    Tries Option Chain Snapshot first (greeks, IV, break_even); falls back to prev/open-close for price. Uses Massive API.
     Returns dict with: last, open, high, low, volume, option_ticker; and when snapshot available:
     delta, gamma, theta, vega, implied_volatility, break_even_price, open_interest.
     """

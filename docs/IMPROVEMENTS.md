@@ -7,12 +7,12 @@ Ideas to make the trade-analyzer even better, roughly by impact and effort.
 - **Load .env at startup** — API keys available before parsing and market/AI calls.
 - **Supported formats from config** — Parse-fail message shows examples from `alert_formats` in config.
 - **Parser validation for ODE** — 0DTE plays use `ode.min_premium` (e.g. 0.30) instead of standard min.
-- **CLI flags** — `--verbose` / `-v` (log market/AI errors to stderr), `--no-ai` (rule-only), `--no-market` (skip Yahoo/Polygon/Brave).
+- **CLI flags** — `--verbose` / `-v` (log market/AI errors to stderr), `--no-ai` (rule-only), `--no-market` (skip Yahoo/Massive/Brave).
 - **.gitignore** — `__pycache__/`, `venv/`, `.pytest_cache/`, coverage artifacts.
 
 ## Done (Greeks / quantitative)
 
-- **Expiration parsing** — Optional `EXP YYYY-MM-DD` or `EXP MM/DD/YYYY` in play string; DTE computed and shown; Polygon uses explicit exp when provided.
+- **Expiration parsing** — Optional `EXP YYYY-MM-DD` or `EXP MM/DD/YYYY` in play string; DTE computed and shown; Massive uses explicit exp when provided.
 - **Greeks & PoP** — Black-Scholes Probability of Profit (scipy); Greeks summary in report (Delta, Gamma, Theta, Vega, IV, PoP); liquidity (volume, OI).
 - **Red flags** — PoP &lt; 50%, high theta decay, high vega, option volume &lt; 500, OI &lt; 1000; DTE &lt; 1 = HIGH RISK. Thresholds in `config.analysis.greeks`.
 - **Setup score 0–100** — Weighted (rules, Greeks, liquidity); "PLAY suggested if score &gt; 75" in report.
@@ -31,7 +31,7 @@ Ideas to make the trade-analyzer even better, roughly by impact and effort.
 
 ## Medium value
 
-- **Retries for external APIs** — Simple retry with backoff for Polygon, Yahoo, Brave to handle transient failures.
+- **Retries for external APIs** — Simple retry with backoff for Massive, Yahoo, Brave to handle transient failures.
 - **Type hints and Protocols** — Replace `Any` for `trade`, `trade_plan`, `recommendation` with proper types or Protocols so IDEs and mypy catch errors.
 - **Help flag** — `--help` / `-h` prints usage and supported formats (from config).
 - **Validate after parse** — Call `parser.validate(trade)` after parse and surface warnings (e.g. premium below min) in the report without blocking.
@@ -39,7 +39,7 @@ Ideas to make the trade-analyzer even better, roughly by impact and effort.
 ## Lower priority
 
 - **Multiple plays in one run** — Accept multiple play strings (e.g. from a file or stdin lines) and run analysis for each; optional `--json` array output.
-- **IV rank / volatility context** — Done: recompute from Polygon + yfinance; see "Historical IV Recompute for IV Rank" above.
+- **IV rank / volatility context** — Done: recompute from Massive + yfinance; see "Historical IV Recompute for IV Rank" above.
 - **Expiration date parsing** — Done: EXP YYYY-MM-DD or MM/DD/YYYY; DTE in report.
 - **Discord output** — Re-enable optional Discord webhook output (module exists) via config or flag for users who want to post the report to a channel.
 

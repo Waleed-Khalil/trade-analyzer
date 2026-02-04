@@ -5,7 +5,7 @@ The analyzer uses **four data sources** to give you a full recommendation. Only 
 | API | Purpose | Key | Required? |
 |-----|---------|-----|-----------|
 | **Yahoo Finance** (yfinance) | Underlying price, day range, volume | None | No — improves price context |
-| **Polygon** | Live option price (contract lookup + OHLC) | `POLYGON_API_KEY` | No — improves option context |
+| **Massive/Polygon** | Live option price, Quotes, Last Trade, Market Status (contract lookup + OHLC) | `POLYGON_API_KEY` or `MASSIVE_API_KEY` (same key) | No — improves option context |
 | **Brave Search** | Recent news/headlines for the ticker | `BRAVE_API_KEY` | No — improves news/catalyst context |
 | **LLM (Anthropic)** | Play/Don't Play, reasoning, stop, targets, levels | `ANTHROPIC_API_KEY` | Yes, for AI recommendation |
 
@@ -30,16 +30,18 @@ The analyzer uses **four data sources** to give you a full recommendation. Only 
 
 ---
 
-## 3. Polygon (options data)
+## 3. Massive (options data)
 
-- **What it provides**: Live option price for the pasted play. Resolves the option contract (underlying + strike + type + expiration) via `/v3/reference/options/contracts`, then fetches OHLC via previous-day bar or daily open/close. Shown as "Option (live)" in the report and passed to the AI.
-- **Key**: **POLYGON_API_KEY** — get it at [Polygon.io](https://polygon.io/).
+- **What it provides**: Live option price for the pasted play. Resolves the option contract (underlying + strike + type + expiration) via `/v3/reference/options/contracts`, then fetches OHLC via previous-day bar or daily open/close. Shown as "Option (live)" in the report and passed to the AI. Also fetches Quotes (bid/ask), Last Trade, and Market Status when available.
+- **Key**: **MASSIVE_API_KEY** or **POLYGON_API_KEY** (same key for both; either name works). Base URL: **https://api.massive.com** (override with **MASSIVE_BASE_URL** in `.env` if needed).
 - **Required**: No. Without it, option data in the report is "from pasted play only."
-- **Endpoints used**: Options contracts (contract lookup), previous day bar or open-close (option price), and when IV Rank recompute is enabled: `/v2/aggs/ticker/{optionTicker}/range/1/day/{from}/{to}` for historical daily bars. No extra install (uses `urllib`).
+- **Endpoints used**: Options contracts (contract lookup), Option Chain Snapshot (greeks, IV, break-even, last, volume, OI), previous day bar or open-close (option price), **Quotes** (`/v3/quotes/{optionsTicker}`) for latest bid/ask and spread, **Last Trade** (`/v2/last/trade/{optionsTicker}`) for most recent trade and staleness, **Market Status** (`/v1/marketstatus/now`) for open/closed/extended-hours, and when IV Rank recompute is enabled: `/v2/aggs/ticker/{optionTicker}/range/1/day/{from}/{to}` for historical daily bars. No extra install (uses `urllib`).
+
+**Quotes & Last Trade:** When an option ticker is available, the app fetches the latest quote (bid/ask) and last trade. Bid/ask spread as a percentage of mid is shown in the report and triggers a red flag when above `analysis.greeks.quote_spread_pct_max` (default 15%). Last-trade price and age (e.g. "2m ago") help detect stale data. **Market Status** is fetched once per run and shown as "Market: open/closed/extended-hours" so you know whether live data is current.
 
 ### Historical IV Recompute (IV Rank)
 
-When `analysis.iv_rank.use_historical_recompute: true`, the app uses **one** Polygon range-aggregates call per run to fetch option daily closes over the lookback window (capped at `max_historical_iv_days`, e.g. 126). Underlying daily closes come from yfinance. IV is recomputed per day via Black-Scholes inversion (scipy); IV Rank = (current IV − min) / (max − min) × 100. Requires at least `min_historical_samples` valid IVs; otherwise the report shows "52w Rank: N/A". Falls back gracefully on Polygon timeout or rate-limit.
+When `analysis.iv_rank.use_historical_recompute: true`, the app uses **one** Massive range-aggregates call per run to fetch option daily closes over the lookback window (capped at `max_historical_iv_days`, e.g. 126). Underlying daily closes come from yfinance. IV is recomputed per day via Black-Scholes inversion (scipy); IV Rank = (current IV − min) / (max − min) × 100. Requires at least `min_historical_samples` valid IVs; otherwise the report shows "52w Rank: N/A". Falls back gracefully on Massive API timeout or rate-limit.
 
 ---
 
@@ -57,7 +59,7 @@ When `analysis.iv_rank.use_historical_recompute: true`, the app uses **one** Pol
 
 - **Minimum (rule-based only)**: No keys. Paste a play; get rule-based Go/No-Go, stop, and targets.
 - **Full AI recommendation**: Set **ANTHROPIC_API_KEY**. For MiniMax also set **ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic** and `analysis.model: MiniMax-M2.1` in config.
-- **Better context**: **yfinance** (no key) for underlying price, **POLYGON_API_KEY** for live option price, **BRAVE_API_KEY** for news. All optional.
+- **Better context**: **yfinance** (no key) for underlying price, **POLYGON_API_KEY** (or MASSIVE_API_KEY; same key) for live option price (Quotes, Last Trade, Market Status), **BRAVE_API_KEY** for news. All optional.
 
 **.env example:**
 
@@ -65,8 +67,10 @@ When `analysis.iv_rank.use_historical_recompute: true`, the app uses **one** Pol
 # MiniMax: use Anthropic-compatible API
 ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic
 ANTHROPIC_API_KEY=your_minimax_key
-POLYGON_API_KEY=your_polygon_key
+POLYGON_API_KEY=your_key   # same key for Polygon/Massive
 BRAVE_API_KEY=BSA...
+# Optional: if using Massive, base URL defaults to https://api.massive.com
+# MASSIVE_BASE_URL=https://api.massive.com
 ```
 
 No key is needed for Yahoo Finance; it’s used via the `yfinance` library.

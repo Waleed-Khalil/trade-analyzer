@@ -30,11 +30,13 @@ pip install -r requirements.txt
 ```bash
 # Create .env in project root (optional)
 echo ANTHROPIC_API_KEY=your_key_here >> .env
+echo POLYGON_API_KEY=your_key >> .env   # optional: live option (Polygon/Massive same key)
 echo BRAVE_API_KEY=your_brave_key >> .env   # optional: news context
 ```
 
 - **ANTHROPIC_API_KEY**: Enables AI recommendation (Play/Don’t Play, reasoning, stop, targets, levels). Without it, you still get rule-based analysis and levels.
 - **Yahoo Finance** (yfinance): Current underlying price when available - no API key.
+- **Massive/Polygon** (POLYGON_API_KEY or MASSIVE_API_KEY, same key): Live option price, bid/ask, last trade, market status - optional; improves report and red flags. See [docs/APIS.md](docs/APIS.md).
 - **Brave Search** (BRAVE_API_KEY): Recent news/headlines for the ticker - optional; improves AI context. See [docs/APIS.md](docs/APIS.md) for all APIs and keys.
 
 ## Running
@@ -54,7 +56,7 @@ python src/main.py
 
 - `--verbose` / `-v` — Log market-data and AI errors to stderr.
 - `--no-ai` — Use rule-based recommendation only (no API key needed).
-- `--no-market` — Skip Yahoo, Polygon, and Brave; use pasted data only.
+- `--no-market` — Skip Yahoo, Massive, and Brave; use pasted data only.
 - `--dte N` / `-d N` — Set **days to expiration** (DTE) explicitly. Overrides any DTE from the play text. Analysis (stops, targets, ODE rules) uses this value.
 
 Example: `python src/main.py --no-ai --no-market "AAPL CALL 215 @ 3.50"`  

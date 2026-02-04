@@ -1,6 +1,6 @@
 """
 Volatility helpers: IV Rank (when historical IV available), realized vol from underlying.
-Historical IV: recomputed from Polygon option aggs + Yahoo underlying via Black-Scholes inverse.
+Historical IV: recomputed from Massive option aggs + Yahoo underlying via Black-Scholes inverse.
 Realized vol from Yahoo daily closes as context (IV vs realized).
 """
 
@@ -37,7 +37,7 @@ def get_historical_ivs_polygon(
     sigma_high: float = 5.0,
 ) -> List[float]:
     """
-    Recompute historical IV from Polygon option daily bars + Yahoo underlying closes.
+    Recompute historical IV from Massive option daily bars + Yahoo underlying closes.
     For each date with option close and underlying close, solve Black-Scholes for sigma.
     Returns list of annualized IVs (decimals). Empty list on failure or if valid IVs < min_historical_samples.
     max_days: cap lookback to limit API/compute (e.g. 126 for ~6 months).

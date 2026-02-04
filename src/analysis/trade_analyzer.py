@@ -250,6 +250,16 @@ class TradeAnalyzer:
                 "severity": "medium",
                 "message": f"Open interest {oi} below {oi_min} - liquidity risk"
             })
+        # Wide bid/ask spread (slippage risk)
+        oq = ctx.get("option_quote") or {}
+        spread_pct = oq.get("spread_pct_of_mid")
+        spread_pct_max = greeks_cfg.get("quote_spread_pct_max", 15)
+        if spread_pct is not None and spread_pct > spread_pct_max:
+            flags.append({
+                "type": "wide_spread",
+                "severity": "high" if spread_pct > 25 else "medium",
+                "message": f"Wide bid/ask spread ({spread_pct:.0f}% of mid) - execution/slippage risk"
+            })
 
         # Technical: RSI overbought (calls) / oversold (puts), MACD bearish for calls
         tech_cfg = self.analysis_config.get("technical", {})
@@ -412,7 +422,11 @@ class TradeAnalyzer:
         greeks_cfg = self.analysis_config.get("greeks", {})
         oi_min = greeks_cfg.get("open_interest_min", 1000)
         vol_min = greeks_cfg.get("option_volume_min", 500)
-        if ctx.get("open_interest", 0) >= oi_min and ctx.get("option_volume", 0) >= vol_min:
+        has_liquidity_red = any(f.get("type") == "liquidity" for f in red_flags)
+        if has_liquidity_red:
+            liquidity = -3
+            base -= 3
+        elif ctx.get("open_interest", 0) >= oi_min and ctx.get("option_volume", 0) >= vol_min:
             liquidity = 3
             base += 3
         technical = 0

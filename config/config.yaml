@@ -75,6 +75,7 @@ analysis:
     vega_high: 0.20        # Vega above => high IV sensitivity
     option_volume_min: 500   # Option volume below => liquidity red flag
     open_interest_min: 1000 # OI below => liquidity red flag
+    quote_spread_pct_max: 15  # Bid/ask spread above this % of mid => wide-spread red flag
   # Stress test: instant underlying move scenarios (P/L via Black-Scholes reprice)
   stress:
     scenarios: [-0.02, -0.01, 0.01, 0.02]  # % as decimals: -2%, -1%, +1%, +2%
@@ -82,15 +83,15 @@ analysis:
     risk_free_rate: 0.0367
     # Flag if -1% move causes loss >= this % of risk (vulnerable to small downside). Tunable.
     downside_1pct_loss_threshold_pct: 50
-  # IV Rank & vol context (historical IV: Polygon recompute or external; realized vol from Yahoo)
+  # IV Rank & vol context (historical IV: Massive recompute or external; realized vol from Yahoo)
   iv_rank:
     lookback_days: 365        # 52w for rank when historical IV available
     rank_high_threshold: 80   # Rank > this => overpriced, caution on longs
     rank_low_threshold: 30    # Rank < this => low IV, favorable for buys
     realized_vol_window: 30   # Days for realized vol (Yahoo daily closes)
-    # Recompute historical IV from Polygon option aggs + Yahoo spot (no pre-computed IV API)
+    # Recompute historical IV from Massive option aggs + Yahoo spot (no pre-computed IV API)
     use_historical_recompute: true
-    max_historical_iv_days: 126  # Cap lookback to limit Polygon calls and compute (~6 months)
+    max_historical_iv_days: 126  # Cap lookback to limit Massive API calls and compute (~6 months)
     min_historical_samples: 30   # Require at least this many valid IVs for rank; else N/A
     solver_sigma_low: 0.001      # IV solver (brentq) lower bound; tune if extreme IVs fail
     solver_sigma_high: 5.0       # IV solver upper bound (500% annualized)

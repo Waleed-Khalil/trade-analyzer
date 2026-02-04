@@ -217,6 +217,48 @@ def days_to_years(days: Optional[int]) -> Optional[float]:
     return days / 365.0
 
 
+def scenario_probabilities(
+    spot: float,
+    time_years: float,
+    risk_free_rate: float,
+    implied_vol: float,
+    option_type: str = "call",
+    scenario_pct: Optional[List[float]] = None,
+) -> Optional[List[Tuple[float, float]]]:
+    """
+    Probability that underlying is at or beyond each % move by expiration (IV-based).
+    Returns list of (pct_move, prob) e.g. (0.02, 0.18) for 18% prob of +2% move.
+    For calls: prob = P(S_T >= spot*(1+pct)). For puts: prob = P(S_T <= spot*(1+pct)).
+    """
+    if norm is None or time_years <= 0 or implied_vol <= 0 or spot <= 0:
+        return None
+    if scenario_pct is None:
+        scenario_pct = [0.01, 0.02, -0.01, -0.02]
+    results = []
+    opt = (option_type or "call").lower()
+    for pct in scenario_pct:
+        strike = spot * (1 + pct)
+        if strike <= 0:
+            continue
+        pop_up = probability_of_profit(
+            spot=spot,
+            strike=strike,
+            time_years=time_years,
+            risk_free_rate=risk_free_rate,
+            implied_vol=implied_vol,
+            option_type="call",
+        )
+        if pop_up is None:
+            continue
+        if opt == "call":
+            prob = pop_up if pct >= 0 else 1.0 - pop_up
+        else:
+            prob = 1.0 - pop_up if pct >= 0 else pop_up
+        prob = max(0.0, min(1.0, prob))
+        results.append((pct, round(prob, 3)))
+    return results if results else None
+
+
 def theta_stress_1d(
     current_premium: float,
     spot: float,

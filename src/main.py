@@ -82,16 +82,43 @@ def _supported_formats(config_path: str) -> list:
 
 def _rule_based_recommendation(trade, trade_plan):
     """Build recommendation from rule-based plan when AI is skipped or fails."""
+    max_risk = getattr(trade_plan.position, "max_risk_dollars", None)
+    max_risk_str = f"${max_risk:.0f}" if isinstance(max_risk, (int, float)) else "N/A"
+    max_gain = getattr(trade_plan, "max_gain_dollars", None)
+    max_gain_str = f"${max_gain:.0f}" if isinstance(max_gain, (int, float)) else "N/A"
+    is_ode = getattr(trade, "is_ode", False)
+    risk_assess = (
+        f"MAX LOSS: {max_risk_str} if stop at ${trade_plan.stop_loss} is hit.\n"
+        f"MAX GAIN: ~{max_gain_str} if target at ${trade_plan.target_1} is hit ({trade_plan.target_1_r}R).\n"
+        "PROBABILITY: Based on rule-based setup and volatility context above."
+    )
+    entry = (
+        f"ENTRY ZONE: ${trade.premium - 0.05:.2f} - ${trade.premium + 0.05:.2f}\n"
+        "CONFIRMATION: Wait for price at or below entry zone before entering.\n"
+        + ("TIMING: Trade early in day for 0DTE." if is_ode else "TIMING: Best during market hours.")
+    )
+    exit_strat = (
+        f"PRIMARY STOP: ${trade_plan.stop_loss} ({trade_plan.stop_risk_pct}% of premium)"
+        + (" - sooner for 0DTE.\n" if is_ode else ".\n")
+        + f"TARGET 1: ${trade_plan.target_1} ({trade_plan.target_1_r}R) - take 50% off here.\n"
+        + f"RUNNER: {trade_plan.runner_contracts} contracts @ ${trade_plan.runner_target} - trail after partial.\n"
+        + ("TIME EXIT: Exit 1 hour before close if not profitable." if is_ode else "TIME EXIT: Exit at 50% DTE if not near targets.")
+    )
+    market_ctx = "TREND/VOLATILITY: See technicals and IV rank above. SENTIMENT: Rule-based only; set AI key for full context."
     class RuleRecommendation:
         recommendation = trade_plan.go_no_go
-        reasoning = "; ".join(trade_plan.go_no_go_reasons) or "Rule-based pass/fail."
+        reasoning = "; ".join(getattr(trade_plan, "go_no_go_reasons", None) or []) or "Rule-based pass/fail."
+        risk_assessment = risk_assess
+        entry_criteria = entry
+        exit_strategy = exit_strat
+        market_context = market_ctx
         stop_loss_suggestion = f"${trade_plan.stop_loss} ({trade_plan.stop_risk_pct}% of premium)"
         take_profit_levels = [
             f"T1: ${trade_plan.target_1} ({trade_plan.target_1_r}R)",
             f"Runner: {trade_plan.runner_contracts} @ ${trade_plan.runner_target}" if trade_plan.runner_contracts else "",
         ]
         support_resistance = []
-        ode_risks = ["Consider theta decay and time of day."] if getattr(trade, "is_ode", False) else []
+        ode_risks = ["Consider theta decay and time of day."] if is_ode else []
     return RuleRecommendation()
 
 
@@ -132,7 +159,7 @@ def main() -> None:
             days_to_expiration=dte_override,
         )
 
-    # Optional: fetch underlying (Yahoo), option (Polygon), news (Brave Search)
+    # Optional: fetch underlying (Yahoo), option (Massive), news (Brave Search)
     current_price = None
     market_context = {}
     news_context = []
@@ -140,7 +167,12 @@ def main() -> None:
     if not no_market:
         try:
             from market_data.market_data import get_market_context, get_news_context
-            from market_data.polygon_client import get_option_live_price
+            from market_data.polygon_client import (
+                get_option_live_price,
+                get_option_quotes_latest,
+                get_option_last_trade,
+                get_market_status,
+            )
             market_context = get_market_context(trade.ticker)
             current_price = market_context.get("current_price")
             news_context = get_news_context(trade.ticker)
@@ -161,6 +193,25 @@ def main() -> None:
                     market_context["open_interest"] = option_quote.get("open_interest")
                 if option_quote.get("volume") is not None:
                     market_context["option_volume"] = option_quote.get("volume")
+                # Quotes (bid/ask) and Last Trade for spread + staleness
+                opt_ticker = option_quote.get("option_ticker")
+                if opt_ticker:
+                    try:
+                        latest_quote = get_option_quotes_latest(opt_ticker)
+                        if latest_quote:
+                            market_context["option_quote"] = latest_quote
+                        last_trade = get_option_last_trade(opt_ticker)
+                        if last_trade:
+                            market_context["option_last_trade"] = last_trade
+                    except Exception:
+                        pass
+            # Market status (open/closed/extended-hours)
+            try:
+                status = get_market_status()
+                if status:
+                    market_context["market_status"] = status
+            except Exception:
+                pass
             market_context["days_to_expiration"] = getattr(trade, "days_to_expiration", None)
             # Strike context (ITM/OTM %), time to close (0DTE), pasted vs live
             from analysis.context import get_strike_context, get_time_to_close_et_minutes, pasted_vs_live_premium_diff_pct
@@ -171,13 +222,20 @@ def main() -> None:
                     market_context["minutes_to_close_et"] = mins
             if option_quote and (live := option_quote.get("last")) is not None:
                 market_context["premium_diff_pct"] = pasted_vs_live_premium_diff_pct(trade.premium, live)
-            # Break-even at expiration if not from Polygon (call: strike + premium, put: strike - premium)
+            # Break-even at expiration if not from Massive (call: strike + premium, put: strike - premium)
             if market_context.get("break_even_price") is None and trade.strike and trade.premium:
                 opt = (getattr(trade, "option_type", "CALL") or "CALL").upper()
                 if opt == "CALL":
                     market_context["break_even_price"] = trade.strike + trade.premium
                 else:
                     market_context["break_even_price"] = trade.strike - trade.premium
+            # Required move to break-even (% total and % per day)
+            be = market_context.get("break_even_price")
+            dte_req = market_context.get("days_to_expiration")
+            if current_price and be is not None and dte_req is not None and dte_req >= 0 and current_price != 0:
+                required_pct = (be - current_price) / current_price
+                market_context["required_move_pct"] = required_pct
+                market_context["required_move_per_day_pct"] = required_pct / max(dte_req, 1)
             # Expected move (1 SD to expiration): spot * IV * sqrt(DTE/365)
             dte_for_move = market_context.get("days_to_expiration")
             iv_for_move = market_context.get("implied_volatility")
@@ -209,6 +267,22 @@ def main() -> None:
                     )
                     if pop is not None:
                         market_context["probability_of_profit"] = round(pop, 2)
+                # Scenario probabilities (prob of +1%/+2%/-1%/-2% move by exp)
+                if current_price and market_context.get("implied_volatility") is not None:
+                    from analysis.greeks import scenario_probabilities, days_to_years
+                    iv_sc = market_context["implied_volatility"]
+                    iv_sc = iv_sc if iv_sc <= 2 else iv_sc / 100.0
+                    t_sc = days_to_years(dte if dte is not None else 0)
+                    if t_sc and t_sc > 0:
+                        probs = scenario_probabilities(
+                            spot=current_price,
+                            time_years=t_sc,
+                            risk_free_rate=0.05,
+                            implied_vol=iv_sc,
+                            option_type=getattr(trade, "option_type", "call"),
+                        )
+                        if probs:
+                            market_context["scenario_probs"] = probs
                 elif dte is not None and dte == 0:
                     t_same_day = 0.5 / 365.0  # half day as proxy
                     iv = market_context["implied_volatility"]
@@ -255,7 +329,7 @@ def main() -> None:
                 print(f"[verbose] Events fetch skipped: {e}", file=sys.stderr)
             market_context["events"] = {}
 
-    # IV Rank & realized vol (historical IV from Polygon when available; realized from Yahoo)
+    # IV Rank & realized vol (historical IV from Massive when available; realized from Yahoo)
     if not no_market and trade.ticker:
         try:
             import yaml

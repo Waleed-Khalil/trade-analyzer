@@ -253,12 +253,9 @@ def get_events(ticker: str, dte: int) -> Dict[str, Any]:
             info = t.info
             if isinstance(info, dict):
                 ex_ts = info.get("exDividendDate")
-                if ex_ts is not None:
-                    if isinstance(ex_ts, (int, float)):
-                        ex_dt = datetime.fromtimestamp(ex_ts)
-                        ex_d = ex_dt.date()
-                    else:
-                        continue
+                if ex_ts is not None and isinstance(ex_ts, (int, float)):
+                    ex_dt = datetime.fromtimestamp(ex_ts)
+                    ex_d = ex_dt.date()
                     days_to_div = (ex_d - today).days
                     if 0 <= days_to_div <= window_end:
                         events["dividend"] = {"date": ex_d.strftime("%Y-%m-%d"), "days_to": days_to_div}
