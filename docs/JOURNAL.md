@@ -1,160 +1,200 @@
-# Trade Journal
+# Trade Journal v2
 
-Local database for tracking all option trades with full analytics.
+Local database for tracking all option trades with bankroll and risk management.
 
-## Features
+## What's New in v2
 
-- **Trade Logging** - Add trades from text or screenshots
-- **P&L Tracking** - Calculate wins/losses automatically
-- **Monthly Stats** - See how you're doing each month
-- **Win Rate** - Track win percentage over time
-- **Performance Reports** - Generate detailed reports
-- **Export** - Export to CSV for Excel
+- **Bankroll Tracking** - Track your balance over time
+- **Risk % Per Trade** - See how much you're risking
+- **Improvement Report** - Get actionable tips to improve
+- **Loss Analysis** - Understand why you lose
 
 ## Quick Start
 
-### Add a Trade from Text
+### Set Your Bankroll
+
+```bash
+python scripts/trade_journal.py set-bankroll 10000
+```
+
+### Add a Trade
 
 ```bash
 python scripts/trade_journal.py add MSFT 430 CALL 0.78 3
-python scripts/trade_journal.py add SPY 580 PUT 1.20 2 --stop 0.80 --target 2.00
 ```
 
 ### Close a Trade
 
 ```bash
-python scripts/trade_journal.py close TRD_20260204_190000_abc123 0.85
+python scripts/trade_journal.py close TRD_xxx 0.85
 ```
 
-### View Statistics
+### View Report
 
 ```bash
-# All-time stats
-python scripts/trade_journal.py stats
-
-# Monthly breakdown
-python scripts/trade_journal.py monthly
-
-# Performance report (last 30 days)
 python scripts/trade_journal.py report
-
-# List recent trades
-python scripts/trade_journal.py list
 ```
 
-## Adding Trades from Screenshots
-
-Send me screenshots of your trades and I'll:
-1. Extract the data (ticker, strike, premium, etc.)
-2. Add to the journal
-3. Track until you close it
-
-## Analytics
-
-### Monthly Stats
+## Commands
 
 ```
-2026-02: +$120.50 (12 trades, 58% win rate)
-2026-01: -$45.20 (8 trades, 45% win rate)
-2025-12: +$280.00 (15 trades, 62% win rate)
+set-bankroll 10000    # Set your starting bankroll
+add TICKER STRIKE TYPE PREMIUM CONTRACTS
+close TRADE_ID EXIT_PRICE
+report               # Full improvement report
+stats                # Quick stats
+monthly               # Monthly breakdown
+list                  # List recent trades
 ```
 
-### Performance Report
+## Example: Your Current Stats
 
 ```
-╔══════════════════════════════════════════════════════════════╗
-║           TRADE JOURNAL PERFORMANCE REPORT                  ║
-║                    Last 30 Days                            ║
-╚══════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════╗
+║                    TRADING IMPROVEMENT REPORT                  ║
+╚══════════════════════════════════════════════════════════════════════╝
 
-📊 SUMMARY
-─────────────────────────────────────────────────────────────
-Total Trades: 24
-Closed: 20
-Open: 4
-Win Rate: 55.0%
+💰 BANKROLL
+──────────────────────────────────────────────────────────────────
+Starting: $10,000.00
+Current:  $9,925.00
+Change:   -$75.00 (-0.75%)
 
-💰 P/L
-─────────────────────────────────────────────────────────────
-Total P/L: +$145.50
-Wins: +$320.00 (11 trades)
-Losses: -$174.50 (9 trades)
+📊 PERFORMANCE
+──────────────────────────────────────────────────────────────────
+Total Trades: 2
+Win Rate: 0.0%
+Total P/L: -$75.00
 
-📈 BEST TRADES
-─────────────────────────────────────────────────────────────
-1. NVDA 1500C @ $25.00 → $32.50
-   +$2,250.00 (+90.0%) | 2 contracts
+⚠️ RISK ANALYSIS
+──────────────────────────────────────────────────────────────────
+Avg Risk/Trade: 0.95%
+Max Risk/Trade: 0.96%
+Trades >2% Risk: 0
 
-2. MSFT 430C @ $0.78 → $1.25
-   +$141.00 (+60.2%) | 3 contracts
+✅ Your risk per trade looks appropriate (1-2%)
+
+📈 IMPROVEMENT TIPS
+──────────────────────────────────────────────────────────────────
+
+❌ LOSS ANALYSIS (2 losing trades):
+• Avg loss: -$37.50
+
+
+🎯 TOP 5 IMPROVEMENTS
+──────────────────────────────────────────────────────────────────
+1. Check trend before entering (RSI, MACD, 5-day direction)
+2. Use the monitor - don't panic sell
+3. Risk max 1-2% per trade
+4. Only trade with catalysts (earnings, news)
+5. Set stops BEFORE entering, don't move them
 ```
 
-## Data Storage
+## Risk Management Rules
 
-Trades stored in: `logs/trade_journal.json`
-Export CSV: `logs/trade_journal.csv`
+| Bankroll | Max Risk/Trade (1%) | Max Risk/Trade (2%) |
+|----------|---------------------|---------------------|
+| $5,000 | $50 | $100 |
+| $10,000 | $100 | $200 |
+| $25,000 | $250 | $500 |
+| $50,000 | $500 | $1,000 |
 
-## Example Workflow
+## How to Improve
+
+### 1. Check Trend First
+
+```bash
+# Before buying CALLS, check:
+# - RSI above 50 = bullish
+# - MACD bullish = bullish
+# - 5-day return positive = bullish
+
+# Before buying PUTS, check opposite
+```
+
+### 2. Use the Monitor
+
+Every 0DTE trade should have monitoring:
+```bash
+python scripts/trade-monitor.py
+```
+
+### 3. Position Sizing
+
+Example with $10,000 bankroll:
+- Max risk: $100 (1%) per trade
+- If entry = $1.00, stop = $0.50
+- Risk = $0.50 × 100 = $50 per contract
+- You can buy: 2 contracts ($100 risk)
+
+### 4. Only Trade with Catalysts
+
+- Earnings dates
+- CPI/Fed announcements
+- Major news events
+- Avoid: Trading on quiet days without news
+
+### 5. Risk:Reward Ratio
+
+Only take trades with 2:1 or better:
+```
+Stop: 30% of premium
+Target: 60%+ of premium
+Ratio: 2:1 ✓
+```
+
+## Files
 
 ```
-You: [Screenshot of MSFT 430c]
-
-I: Extracting trade data...
-✅ Trade added: TRD_20260204_150000_abc123
-   MSFT 430C @ $0.78 x 3 contracts
-
-[Later...]
-
-You: Closed MSFT @ 0.85
-
-I: ✅ Trade closed
-   P/L: +$21.00 (+8.5%)
-   Monthly total: +$85.50 (5 trades, 60% win rate)
+logs/
+├── trade_journal.json   # All trades
+└── bankroll.json        # Bankroll balance
 ```
 
 ## API Usage
 
 ```python
-from trade_journal import TradeJournal, create_trade_from_text
+from trade_journal import TradeJournal
 
 journal = TradeJournal()
+
+# Set bankroll
+journal.set_bankroll(starting=10000, current=10000)
 
 # Add trade
 trade = create_trade_from_text("MSFT", 430, "CALL", 0.78, 3)
 journal.add_trade(trade)
 
 # Close trade
-journal.close_trade(trade.id, 0.85)
+journal.close_trade(trade.id, 0.85, "Took profit")
+
+# Get report
+print(journal.get_improvement_report())
 
 # Get stats
-stats = journal.get_monthly_stats(2026, 2)
-print(f"Monthly P/L: ${stats['total_pnl']:+.2f}")
-print(f"Win Rate: {stats['win_rate']}%")
+stats = journal.get_bankroll_stats()
+print(f"Bankroll: ${stats['current_balance']:,.2f}")
 ```
 
-## Trade Fields
+## Adding Screenshots
 
-| Field | Description |
-|-------|-------------|
-| id | Unique trade ID |
-| ticker | Stock ticker (MSFT, SPY, etc.) |
-| strike | Strike price |
-| option_type | CALL or PUT |
-| entry_price | Premium paid |
-| exit_price | Premium received (on close) |
-| contracts | Number of contracts |
-| pnl | Profit/loss in dollars |
-| pnl_pct | Profit/loss percentage |
-| stop_loss | Planned stop loss |
-| target | Target price |
-| notes | Any additional notes |
+Send me screenshots of your trades and I'll:
+1. Extract the data
+2. Add to the journal
+3. Track until you close
+4. Generate reports
 
-## Export
+## Monthly Goals
 
-Export all trades to CSV for analysis in Excel:
-
+Set monthly targets:
 ```bash
-python scripts/trade_journal.py export
+# Example goals for February
+- Win rate: 55%+
+- Max drawdown: <5%
+- Profit: +$500
 ```
 
-This creates `logs/trade_journal.csv` with all trade data.
+Track progress with:
+```bash
+python scripts/trade_journal.py monthly
+```
