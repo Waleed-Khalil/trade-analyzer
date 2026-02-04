@@ -46,14 +46,58 @@ class OptionAIAgent:
                 raise ValueError(
                     "ANTHROPIC_API_KEY not set. Set it in your environment to use AI recommendations."
                 )
-            from anthropic import Anthropic
-            # MiniMax and other compatible providers: set ANTHROPIC_BASE_URL (e.g. https://api.minimax.io/anthropic)
+            # MiniMax uses OpenAI-compatible API format
             base_url = os.getenv("ANTHROPIC_BASE_URL")
-            kwargs = {"api_key": api_key}
-            if base_url:
-                kwargs["base_url"] = base_url
-            self._client = Anthropic(**kwargs)
+            try:
+                from openai import OpenAI
+                kwargs = {"api_key": api_key}
+                if base_url:
+                    kwargs["base_url"] = base_url
+                self._client = OpenAI(**kwargs)
+            except ImportError:
+                # Fallback to requests if openai not available
+                self._client = {"api_key": api_key, "base_url": base_url}
         return self._client
+
+    def _call_api(self, prompt: str) -> str:
+        """Call the API with the prompt and return the response text."""
+        client = self._get_client()
+        base_url = os.getenv("ANTHROPIC_BASE_URL", "")
+        
+        # Check if using OpenAI client
+        if hasattr(client, 'chat') and hasattr(client.chat, 'completions'):
+            # OpenAI or compatible SDK
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2048,
+            )
+            if response.choices and response.choices[0].message.content:
+                return response.choices[0].message.content
+        else:
+            # Fallback to direct HTTP request (MiniMax/OpenAI-compatible)
+            import requests
+            headers = {
+                "Authorization": f"Bearer {client['api_key']}",
+                "Content-Type": "application/json",
+            }
+            data = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 2048,
+            }
+            url = f"{client['base_url']}/chat/completions"
+            if not client['base_url'].endswith('/chat/completions'):
+                url = f"{client['base_url']}/chat/completions"
+            response = requests.post(url, headers=headers, json=data, timeout=60)
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("choices") and result["choices"][0].get("message", {}).get("content"):
+                    return result["choices"][0]["message"]["content"]
+            else:
+                raise Exception(f"API call failed: {response.status_code} - {response.text}")
+        
+        return ""
 
     def get_recommendation(
         self,
@@ -80,21 +124,7 @@ class OptionAIAgent:
         )
 
         try:
-            client = self._get_client()
-            response = client.messages.create(
-                model=self.model,
-                max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            # Compatible with Anthropic and MiniMax (blocks may have .type and .text)
-            text = ""
-            if response.content:
-                for block in response.content:
-                    t = getattr(block, "text", None)
-                    if t:
-                        text += t
-            if not text and response.content:
-                text = getattr(response.content[0], "text", "") or ""
+            text = self._call_api(prompt)
             return self._parse_response(text, trade, trade_plan)
         except Exception as e:
             # Fallback to rule-based

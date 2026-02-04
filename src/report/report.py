@@ -296,6 +296,14 @@ def print_analysis_report(
         print(f"  T1: ${trade_plan.target_1} ({trade_plan.target_1_r}R)")
         if trade_plan.runner_contracts:
             print(f"  Runner: {trade_plan.runner_contracts} @ ${trade_plan.runner_target}")
+    
+    # Show technical reasoning if available
+    if getattr(trade_plan, "technical_reasoning", ""):
+        print()
+        print("  TECHNICAL TARGET BASIS")
+        print(sub)
+        print(f"  {trade_plan.technical_reasoning}")
+    
     print()
 
     # ============================================================

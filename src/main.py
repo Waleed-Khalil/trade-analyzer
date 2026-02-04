@@ -311,7 +311,7 @@ def main() -> None:
 
     # Rule-based plan (ODE params applied automatically when is_ode)
     engine = RiskEngine(config_path)
-    trade_plan = engine.create_trade_plan(trade, current_price=current_price)
+    trade_plan = engine.create_trade_plan(trade, current_price=current_price, market_context=market_context)
 
     # Stress test: P/L for instant underlying moves (Black-Scholes reprice)
     iv_for_stress = market_context.get("implied_volatility")

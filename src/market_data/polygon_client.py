@@ -8,6 +8,13 @@ import re
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
+# Load .env file if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 BASE_URL = "https://api.polygon.io"
 
 

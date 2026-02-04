@@ -38,6 +38,8 @@ class TradePlan:
     max_gain_dollars: float
     go_no_go: str
     go_no_go_reasons: list
+    technical_reasoning: str = ""  # Technical analysis for targets
+    is_technical: bool = False  # True if using technical targets
 
 
 class RiskEngine:
@@ -157,30 +159,92 @@ class RiskEngine:
             self.targets.get("max_runner_target_r", 5.0),
         )
 
-    def calculate_targets(self, trade, stop_info: Dict, position: PositionSize) -> Dict[str, Any]:
+    def calculate_targets(self, trade, stop_info: Dict, position: PositionSize, 
+                          current_price: float = None,
+                          market_context: Dict = None) -> Dict[str, Any]:
         """
-        Calculate profit targets and runner plan. Uses ODE params for same-day expiration.
+        Calculate profit targets using technical analysis when available.
+        Falls back to R-based targets if technical levels unavailable.
         """
         profit_target_r, runner_activation_r, runner_remaining_pct, max_runner_target_r = self._get_target_params(trade)
 
         stop_loss = stop_info.get('stop_loss', trade.premium * 0.5)
         risk_per_share = trade.premium - stop_loss
-
+        
+        # Try to get technically-grounded targets
+        technical_targets = None
+        if current_price and market_context:
+            try:
+                from analysis.technical_targets import (
+                    get_support_resistance_levels,
+                    get_technical_target_recommendation,
+                )
+                
+                # Get S/R levels
+                sr_levels = get_support_resistance_levels(
+                    trade.ticker, current_price, period=20
+                )
+                support_levels = sr_levels.get("support_levels", [])
+                resistance_levels = sr_levels.get("resistance_levels", [])
+                
+                # Get technical target recommendation
+                iv_percent = market_context.get("implied_volatility", 0.30)
+                if iv_percent > 2:
+                    iv_percent = iv_percent / 100
+                
+                technical_targets = get_technical_target_recommendation(
+                    trade=trade,
+                    current_price=current_price,
+                    entry_premium=trade.premium,
+                    stop_premium=stop_loss,
+                    support_levels=support_levels,
+                    resistance_levels=resistance_levels,
+                    option_type=getattr(trade, "option_type", "CALL"),
+                    days_to_expiration=getattr(trade, "days_to_expiration", 0) or 0,
+                    iv_percent=iv_percent,
+                )
+            except ImportError:
+                pass  # Technical targets module not available
+        
+        # Use technical targets if available, otherwise use R-based
+        if technical_targets and technical_targets.get("conservative_target"):
+            cons = technical_targets["conservative_target"]
+            mod = technical_targets.get("moderate_target")
+            agg = technical_targets.get("aggressive_target")
+            
+            # Use conservative (first technical level) as T1
+            target_1 = cons.get("premium", trade.premium + risk_per_share * profit_target_r)
+            target_1_r = cons.get("r_multiple", profit_target_r)
+            
+            # Use moderate as runner if available
+            runner_target = mod.get("premium", trade.premium + risk_per_share * max_runner_target_r)
+            
+            return {
+                "target_1": round(target_1, 2),
+                "target_1_r": round(target_1_r, 1),
+                "runner_activated": True,
+                "runner_contracts": int(position.contracts * runner_remaining_pct),
+                "runner_target": round(runner_target, 2),
+                "max_runner_target_r": max_runner_target_r,
+                "technical_reasoning": technical_targets.get("reasoning", ""),
+                "is_technical": True,
+                "reasoning": f"Technical targets: {technical_targets.get('reasoning', 'S/R-based')}",
+            }
+        
+        # Fallback to R-based targets
         target_1 = trade.premium + (risk_per_share * profit_target_r)
         target_1_r = profit_target_r
-
-        runner_contracts = int(position.contracts * runner_remaining_pct)
-        runner_contracts = max(runner_contracts, 1) if position.contracts >= 2 else 0
         runner_target = trade.premium + (risk_per_share * max_runner_target_r)
 
         return {
             "target_1": round(target_1, 2),
             "target_1_r": target_1_r,
             "runner_activated": True,
-            "runner_contracts": runner_contracts,
+            "runner_contracts": int(position.contracts * runner_remaining_pct),
             "runner_target": round(runner_target, 2),
             "max_runner_target_r": max_runner_target_r,
-            "reasoning": f"Target 1 at {target_1_r}R (${target_1:.2f}), runner at {max_runner_target_r}R (${runner_target:.2f})"
+            "is_technical": False,
+            "reasoning": f"R-based targets ({profit_target_r}R - {max_runner_target_r}R)"
         }
     
     def check_go_no_go(self, trade, position: PositionSize, current_price: float = None) -> Dict[str, Any]:
@@ -222,9 +286,10 @@ class RiskEngine:
             "is_pass": passed
         }
     
-    def create_trade_plan(self, trade, current_price: float = None) -> TradePlan:
+    def create_trade_plan(self, trade, current_price: float = None, market_context: Dict = None) -> TradePlan:
         """
         Create complete trade plan with all calculations.
+        Uses technical targets when market_context with S/R levels is available.
         """
         # Step 1: Position sizing
         position = self.calculate_position(trade, current_price)
@@ -232,11 +297,15 @@ class RiskEngine:
         # Step 2: Stop losses
         stop_info = self.calculate_stops(trade, position, current_price)
         
-        # Step 3: Targets
-        target_info = self.calculate_targets(trade, stop_info, position)
+        # Step 3: Targets (pass market_context for technical targets)
+        target_info = self.calculate_targets(trade, stop_info, position, current_price, market_context)
         
         # Step 4: Go/No-Go check
         go_check = self.check_go_no_go(trade, position, current_price)
+        
+        # Store technical reasoning if available
+        technical_reasoning = target_info.get("technical_reasoning", "")
+        is_technical = target_info.get("is_technical", False)
         
         return TradePlan(
             trade=trade,
@@ -252,7 +321,9 @@ class RiskEngine:
             max_loss_dollars=stop_info['max_loss_dollars'],
             max_gain_dollars=position.contracts * (target_info['target_1'] - trade.premium) * 100,
             go_no_go=go_check['decision'],
-            go_no_go_reasons=go_check['reasons']
+            go_no_go_reasons=go_check['reasons'],
+            technical_reasoning=technical_reasoning,
+            is_technical=is_technical,
         )
 
 
