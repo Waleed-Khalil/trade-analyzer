@@ -7,11 +7,18 @@ venv/
 .coverage
 htmlcov/
 logs/
+.cache/
+*.log
 # Claude Code internal directory
 .claude/
 # Temporary test scripts
 analyze_trade.py
 run_analysis.bat
+test_*.py
+*_test.py
+CLEANUP_*.md
+TEST_*.md
+TESTING_*.md
 # Frontend
 frontend/node_modules/
 frontend/.next/
