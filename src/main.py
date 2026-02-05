@@ -567,6 +567,23 @@ def run_analysis(
                         if verbose:
                             print(f"[verbose] Trend analysis skipped: {e}", file=sys.stderr)
 
+                # Phase 7: Fibonacci Analysis
+                fib_cfg = analysis_cfg.get("fibonacci", {})
+                if fib_cfg.get("enabled", True) and current_price:
+                    try:
+                        from analysis.fibonacci import get_fib_analysis
+                        fib_analysis = get_fib_analysis(
+                            trade.ticker,
+                            current_price,
+                            df=hist_df,
+                            lookback=fib_cfg.get("lookback_days", 60)
+                        )
+                        if fib_analysis:
+                            market_context["fibonacci_analysis"] = fib_analysis
+                    except Exception as e:
+                        if verbose:
+                            print(f"[verbose] Fibonacci analysis skipped: {e}", file=sys.stderr)
+
         except Exception as e:
             if verbose:
                 print(f"[verbose] Enhanced technical analysis skipped: {e}", file=sys.stderr)

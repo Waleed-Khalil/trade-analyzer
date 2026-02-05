@@ -453,6 +453,34 @@ def print_analysis_report(
         print()
 
     # ============================================================
+    # FIBONACCI LEVELS
+    # ============================================================
+    fib = market_context.get("fibonacci_analysis") if market_context else None
+    if fib:
+        print("  FIBONACCI LEVELS")
+        print(sub)
+        print(f"  Swing: ${fib['swing_low']:.2f} - ${fib['swing_high']:.2f} (${fib['swing_range']:.2f} range)")
+        print(f"  Current: ${fib['current_price']:.2f} ({fib['position'].replace('_', ' ')})")
+
+        # Retracements (support on pullbacks)
+        print()
+        print("  Retracements (pullback support):")
+        for level in [0.236, 0.382, 0.5, 0.618, 0.786]:
+            if level in fib['retracements']:
+                price = fib['retracements'][level]
+                marker = " <--" if abs(fib['current_price'] - price) < fib['swing_range'] * 0.02 else ""
+                print(f"    {level:.3f}: ${price:.2f}{marker}")
+
+        # Extensions (profit targets)
+        print()
+        print("  Extensions (profit targets):")
+        for level in [1.272, 1.414, 1.618, 2.618]:
+            if level in fib['extensions']:
+                price = fib['extensions'][level]
+                print(f"    {level:.3f}: ${price:.2f}")
+        print()
+
+    # ============================================================
     # RED FLAGS
     # ============================================================
     if analysis and analysis.red_flags:
