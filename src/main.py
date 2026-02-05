@@ -573,6 +573,9 @@ def run_analysis(
 
     # Rule-based plan (ODE params applied automatically when is_ode)
     engine = RiskEngine(config_path)
+
+    # First pass: Create preliminary trade_plan with fixed sizing
+    # (needed for analyzer.analyze() to calculate setup_score)
     trade_plan = engine.create_trade_plan(trade, current_price=current_price, market_context=market_context)
 
     # Stress test: P/L for instant underlying moves (Black-Scholes reprice)
@@ -650,6 +653,55 @@ def run_analysis(
         trade, trade_plan, current_price=current_price,
         market_context=market_context, option_live_price=option_quote.get("last") if option_quote else None,
     )
+
+    # Second pass: Recalculate position sizing with smart sizing if enabled
+    # Now that we have setup_score from analysis, use it for optimal position sizing
+    try:
+        import yaml
+        with open(config_path, 'r') as f:
+            cfg = yaml.safe_load(f)
+        sizing_config = cfg.get('sizing', {})
+
+        if sizing_config.get('method') == 'composite' and hasattr(analysis, 'setup_score'):
+            # Store analysis result in market_context for RiskEngine
+            market_context['analysis_result'] = {
+                'setup_score': analysis.setup_score,
+                'setup_quality': analysis.setup_quality,
+                'confidence': analysis.confidence
+            }
+
+            # Recalculate position with smart sizing
+            new_position = engine.calculate_position(
+                trade,
+                current_price,
+                setup_score=analysis.setup_score,
+                iv_rank=market_context.get('iv_rank_percentile'),
+                trade_history=market_context.get('trade_history', []),
+                current_drawdown_pct=market_context.get('current_drawdown_pct', 0.0),
+                stop_loss=trade_plan.stop_loss
+            )
+
+            # Update trade_plan with new position sizing
+            # Recalculate dependent values (max_loss, max_gain)
+            max_loss_dollars = new_position.contracts * (trade.premium - trade_plan.stop_loss) * 100
+            max_gain_dollars = new_position.contracts * (trade_plan.target_1 - trade.premium) * 100
+            runner_contracts = int(new_position.contracts * cfg.get('targets', {}).get('runner_remaining_pct', 0.50))
+
+            # Create updated trade_plan with smart-sized position
+            from dataclasses import replace
+            trade_plan = replace(
+                trade_plan,
+                position=new_position,
+                max_loss_dollars=round(max_loss_dollars, 2),
+                max_gain_dollars=round(max_gain_dollars, 2),
+                runner_contracts=runner_contracts
+            )
+
+            if verbose:
+                print(f"[verbose] Smart sizing applied: {new_position.contracts} contracts (score: {analysis.setup_score})", file=sys.stderr)
+    except Exception as e:
+        if verbose:
+            print(f"[verbose] Smart sizing recalculation skipped: {e}", file=sys.stderr)
 
     # AI recommendation (Anthropic) — Go/No-Go, reasoning, stop, targets, levels
     if no_ai:
