@@ -169,23 +169,24 @@ class PositionSizer:
         final_risk_pct = min(final_risk_pct, self.max_risk_per_trade)
         final_risk_pct = max(final_risk_pct, 0.005)  # Min 0.5% risk
 
-        # Calculate contracts
+        # Calculate contracts (options trade in 100-share lots)
         risk_dollars = account_value * final_risk_pct
-        contracts = int(risk_dollars / risk_per_contract)
+        risk_per_contract_dollars = risk_per_contract * 100  # Convert to contract risk
+        contracts = int(risk_dollars / risk_per_contract_dollars)
         contracts = max(1, contracts)  # At least 1 contract
 
-        # Check position size limit
-        position_value = contracts * entry_price
+        # Check position size limit (position value = contracts * entry_price * 100)
+        position_value = contracts * entry_price * 100
         position_pct = position_value / account_value
 
         if position_pct > self.max_position_pct:
             # Scale down to meet position size limit
-            contracts = int((account_value * self.max_position_pct) / entry_price)
+            contracts = int((account_value * self.max_position_pct) / (entry_price * 100))
             contracts = max(1, contracts)
             adjustments['position_limit'] = {
                 'applied': True,
                 'max_pct': self.max_position_pct,
-                'reduced_from': int(risk_dollars / risk_per_contract)
+                'reduced_from': int(risk_dollars / risk_per_contract_dollars)
             }
 
         # 6. Correlation check
@@ -201,19 +202,25 @@ class PositionSizer:
                 contracts = correlation_limit['max_contracts']
                 adjustments['correlation'] = correlation_limit
 
-        actual_risk_dollars = contracts * risk_per_contract
+        actual_risk_dollars = contracts * risk_per_contract * 100  # Risk in dollars
         actual_risk_pct = actual_risk_dollars / account_value
+        position_value_dollars = contracts * entry_price * 100  # Position value in dollars
 
         return {
             'contracts': contracts,
             'risk_pct': round(actual_risk_pct * 100, 2),
             'risk_dollars': round(actual_risk_dollars, 2),
-            'position_value': round(contracts * entry_price, 2),
-            'position_pct': round((contracts * entry_price / account_value) * 100, 2),
+            'position_value': round(position_value_dollars, 2),
+            'position_pct': round((position_value_dollars / account_value) * 100, 2),
             'sizing_method': 'composite',
             'base_risk_pct': round(base_risk_pct * 100, 2),
             'adjustments': adjustments,
-            'reasoning': self._build_sizing_reasoning(adjustments, setup_score)
+            'reasoning': self._build_sizing_reasoning(adjustments, setup_score),
+            'kelly_pct': adjustments.get('kelly', {}).get('kelly_pct'),
+            'volatility_multiplier': adjustments.get('volatility', {}).get('multiplier'),
+            'setup_multiplier': adjustments.get('setup_quality', {}).get('multiplier'),
+            'equity_multiplier': adjustments.get('equity_curve', {}).get('multiplier'),
+            'drawdown_multiplier': adjustments.get('drawdown', {}).get('multiplier'),
         }
 
     def _calculate_kelly(
