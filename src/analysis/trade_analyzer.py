@@ -619,6 +619,7 @@ class TradeAnalyzer:
             response = self.llm.messages.create(
                 model=self.llm_model,
                 max_tokens=2000,
+                system="You are an expert options trader analyzing trade setups with technical analysis.",
                 messages=[
                     {
                         "role": "user",
@@ -627,8 +628,18 @@ class TradeAnalyzer:
                 ]
             )
 
-            # Parse response
-            content = response.content[0].text
+            # Parse response - handle multiple content blocks (MiniMax M2.1 format)
+            content = ""
+            for block in response.content:
+                if hasattr(block, 'type'):
+                    if block.type == "text" and hasattr(block, 'text'):
+                        content += block.text
+                    elif block.type == "thinking" and hasattr(block, 'thinking'):
+                        # Include thinking for transparency (optional)
+                        pass  # Skip thinking blocks for now
+                elif hasattr(block, 'text'):
+                    # Fallback for standard format
+                    content += block.text
 
             # Extract sections (assuming structured response)
             sections = self._parse_llm_response(content)

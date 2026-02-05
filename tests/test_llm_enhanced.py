@@ -7,6 +7,14 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    repo_root = os.path.join(os.path.dirname(__file__), '..')
+    load_dotenv(os.path.join(repo_root, '.env'))
+except ImportError:
+    pass
+
 import yfinance as yf
 import pandas as pd
 from datetime import datetime

@@ -61,7 +61,7 @@ targets:
 analysis:
   enabled: true
   provider: anthropic
-  model: claude-sonnet-4-5  # or MiniMax-M2.1
+  model: MiniMax-M2.1  # or claude-sonnet-4-5
   llm_enabled: true  # Enable LLM-enhanced natural language analysis
   # Set ANTHROPIC_API_KEY environment variable
   # Set ANTHROPIC_BASE_URL for alternative providers (e.g., MiniMax)
