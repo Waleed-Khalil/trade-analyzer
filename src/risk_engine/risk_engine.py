@@ -126,16 +126,27 @@ class RiskEngine:
 
                 # Build detailed reasoning from all components
                 reasoning_parts = [f"Smart sizing (score: {setup_score})"]
-                if result.get('kelly_pct'):
-                    reasoning_parts.append(f"Kelly: {result['kelly_pct']:.1%}")
-                if result.get('volatility_multiplier', 1.0) != 1.0:
-                    reasoning_parts.append(f"IV adj: {result['volatility_multiplier']:.2f}x")
-                if result.get('setup_multiplier', 1.0) != 1.0:
-                    reasoning_parts.append(f"Quality: {result['setup_multiplier']:.2f}x")
-                if result.get('equity_multiplier', 1.0) != 1.0:
-                    reasoning_parts.append(f"Equity: {result['equity_multiplier']:.2f}x")
-                if result.get('drawdown_multiplier', 1.0) != 1.0:
-                    reasoning_parts.append(f"DD: {result['drawdown_multiplier']:.2f}x")
+
+                # Safely get multipliers, handling None values
+                kelly_pct = result.get('kelly_pct')
+                if kelly_pct:
+                    reasoning_parts.append(f"Kelly: {kelly_pct:.1%}")
+
+                vol_mult = result.get('volatility_multiplier') or 1.0
+                if vol_mult != 1.0:
+                    reasoning_parts.append(f"IV adj: {vol_mult:.2f}x")
+
+                setup_mult = result.get('setup_multiplier') or 1.0
+                if setup_mult != 1.0:
+                    reasoning_parts.append(f"Quality: {setup_mult:.2f}x")
+
+                equity_mult = result.get('equity_multiplier') or 1.0
+                if equity_mult != 1.0:
+                    reasoning_parts.append(f"Equity: {equity_mult:.2f}x")
+
+                dd_mult = result.get('drawdown_multiplier') or 1.0
+                if dd_mult != 1.0:
+                    reasoning_parts.append(f"DD: {dd_mult:.2f}x")
 
                 reasoning = " | ".join(reasoning_parts) + f" → {contracts} contracts"
 
