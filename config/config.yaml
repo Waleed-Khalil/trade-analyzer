@@ -61,7 +61,10 @@ targets:
 analysis:
   enabled: true
   provider: anthropic
-  model: MiniMax-M2.1
+  model: claude-sonnet-4-5  # or MiniMax-M2.1
+  llm_enabled: true  # Enable LLM-enhanced natural language analysis
+  # Set ANTHROPIC_API_KEY environment variable
+  # Set ANTHROPIC_BASE_URL for alternative providers (e.g., MiniMax)
   red_flag_checks:
     iv_rank_above_70: "High IV Rank - theta decay risk"
     days_to_expiration_below_3: "Expiration < 3 days - gamma risk"
@@ -97,6 +100,45 @@ analysis:
     solver_sigma_high: 5.0       # IV solver upper bound (500% annualized)
     # When historical IV is N/A, use 52w realized-vol rank as IV proxy (yfinance only)
     use_hv_rank_fallback: true
+  # Support/Resistance analysis (price action vs psychological levels)
+  support_resistance:
+    enabled: true
+    method: "price_action"  # "price_action", "psychological", "hybrid"
+    lookback_days: 60
+    min_touches: 2
+    zone_clustering_pct: 0.5
+    atr_significance_multiplier: 0.3
+    max_levels: 5
+
+  # Volume analysis (VWAP, volume profile, anomalies)
+  volume:
+    enabled: true
+    vwap_enabled: true
+    volume_profile_enabled: true
+    volume_spike_threshold: 2.0
+    price_bins: 50
+    value_area_pct: 0.70
+    vwap_deviation_warning_pct: 2.0
+
+  # Candlestick pattern recognition
+  patterns:
+    enabled: true
+    lookback_bars: 10
+    detect_patterns: ["engulfing", "pinbar", "doji", "morning_star", "evening_star", "hammer", "shooting_star"]
+    require_volume_confirmation: true
+    bonus_at_sr: 10  # Bonus to setup_score when pattern at S/R
+
+  # Trend analysis (ADX, structure, multi-timeframe)
+  trend:
+    enabled: true
+    adx_period: 14
+    adx_trending_threshold: 25
+    adx_weak_threshold: 20
+    multi_timeframe: [daily, 4h, 1h]
+    alignment_bonus: 15  # Bonus to setup_score for multi-TF alignment
+    counter_trend_severity: "high"  # Severity for counter-trend trades
+    trendline_min_touches: 2
+
   # Multi-timeframe technical confluence (RSI, MACD, SMA) for setup quality
   technical:
     enabled: true

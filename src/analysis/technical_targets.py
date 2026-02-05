@@ -11,53 +11,138 @@ def get_support_resistance_levels(
     ticker: str,
     current_price: float,
     period: int = 20,
+    method: str = "price_action",
+    df: Any = None,
+    atr: float = None,
+    config: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     """
     Calculate support and resistance levels using:
-    - Recent highs/lows
-    - Moving averages (20, 50, 200)
-    - Round numbers (psychological levels)
-    - Volume profile (if available)
-    
-    Returns dict with support_levels, resistance_levels, key_levels.
+    - Price action-based (swing highs/lows) - PRIMARY METHOD
+    - Psychological levels (round numbers) - FALLBACK
+    - Percentage-based S/R - FALLBACK
+
+    Args:
+        ticker: Ticker symbol
+        current_price: Current underlying price
+        period: Period for technical calculations
+        method: "price_action", "psychological", or "hybrid"
+        df: OHLC DataFrame for price action analysis
+        atr: Average True Range value
+        config: Configuration dict with analysis settings
+
+    Returns dict with support_levels, resistance_levels, key_levels, zones.
     """
-    # Placeholder - would integrate with market_data/technical.py
-    # For now, return basic psychological levels and percentage-based S/R
-    
+    if current_price is None:
+        return {"support_levels": [], "resistance_levels": [], "key_levels": {}}
+
+    config = config or {}
+    sr_config = config.get('support_resistance', {})
+
+    # Determine method
+    method = sr_config.get('method', method)
+
     supports = []
     resistances = []
-    key_levels = []
-    
-    if current_price is None:
-        return {"support_levels": [], "resistance_levels": [], "key_levels": []}
-    
-    # Psychological levels (round numbers)
-    round_level = round(current_price / 5) * 5
-    for i in range(1, 4):
-        supports.append(round_level - i * 5)
-        resistances.append(round_level + i * 5)
-    
-    # Percentage-based S/R (1%, 2%, 3%, 5%)
-    for pct in [0.01, 0.02, 0.03, 0.05]:
-        supports.append(round(current_price * (1 - pct) / 1) * 1)
-        resistances.append(round(current_price * (1 + pct) / 1) * 1)
-    
+    zones_data = None
+
+    # Try price action method first (if enabled and data available)
+    if method in ["price_action", "hybrid"] and df is not None and len(df) > 20:
+        try:
+            from analysis.price_action import calculate_support_resistance_zones
+
+            # Get configuration parameters
+            lookback_days = sr_config.get('lookback_days', 60)
+            min_touches = sr_config.get('min_touches', 2)
+            zone_clustering_pct = sr_config.get('zone_clustering_pct', 0.5)
+            max_levels = sr_config.get('max_levels', 5)
+
+            # Calculate price action zones
+            zones_data = calculate_support_resistance_zones(
+                df=df,
+                current_price=current_price,
+                ticker=ticker,
+                lookback_days=lookback_days,
+                min_touches=min_touches,
+                zone_clustering_pct=zone_clustering_pct,
+                atr=atr,
+                max_levels=max_levels,
+            )
+
+            # Extract support and resistance levels from zones
+            supports = [z['price'] for z in zones_data.get('support_zones', [])]
+            resistances = [z['price'] for z in zones_data.get('resistance_zones', [])]
+
+            # If we got good price action levels, use them
+            if len(supports) >= 2 and len(resistances) >= 2:
+                method_used = "price_action"
+            else:
+                # Fall back to hybrid if not enough levels
+                method = "hybrid"
+        except Exception as e:
+            # Fall back to psychological if price action fails
+            print(f"Price action analysis failed: {e}")
+            method = "psychological"
+
+    # Add psychological levels if method is psychological or hybrid (or fallback)
+    if method in ["psychological", "hybrid"] or len(supports) < 2 or len(resistances) < 2:
+        # Psychological levels (round numbers)
+        round_level = round(current_price / 5) * 5
+        psych_supports = []
+        psych_resistances = []
+
+        for i in range(1, 4):
+            psych_supports.append(round_level - i * 5)
+            psych_resistances.append(round_level + i * 5)
+
+        # Percentage-based S/R (1%, 2%, 3%, 5%)
+        for pct in [0.01, 0.02, 0.03, 0.05]:
+            psych_supports.append(round(current_price * (1 - pct), 2))
+            psych_resistances.append(round(current_price * (1 + pct), 2))
+
+        # Merge with price action levels if hybrid
+        if method == "hybrid" and supports:
+            supports.extend(psych_supports)
+            resistances.extend(psych_resistances)
+        else:
+            supports = psych_supports
+            resistances = psych_resistances
+
+        method_used = "psychological" if method != "hybrid" else "hybrid"
+    else:
+        method_used = "price_action"
+
     # Sort and deduplicate
     supports = sorted(list(set([round(s, 2) for s in supports if s < current_price])), reverse=True)
     resistances = sorted(list(set([round(r, 2) for r in resistances if r > current_price])))
-    
+
     # Key levels (closest S and R)
     key_levels = {
         "nearest_support": supports[0] if supports else current_price * 0.95,
         "nearest_resistance": resistances[0] if resistances else current_price * 1.05,
     }
-    
-    return {
+
+    # Add strongest levels if we have zone data
+    if zones_data and zones_data.get('key_levels'):
+        key_levels.update({
+            "strongest_support": zones_data['key_levels'].get('strongest_support'),
+            "strongest_resistance": zones_data['key_levels'].get('strongest_resistance'),
+        })
+
+    result = {
         "support_levels": supports[:5],
         "resistance_levels": resistances[:5],
         "key_levels": key_levels,
-        "method": "psychological_pct",
+        "method": method_used,
     }
+
+    # Include zone metadata if available
+    if zones_data:
+        result['support_zones'] = zones_data.get('support_zones', [])
+        result['resistance_zones'] = zones_data.get('resistance_zones', [])
+        result['metadata'] = zones_data.get('metadata', {})
+
+    return result
 
 
 def calculate_target_from_resistance(

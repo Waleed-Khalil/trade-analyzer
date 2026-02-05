@@ -21,6 +21,12 @@ class AnalysisResult:
     confidence: float  # 0.0 to 1.0
     setup_score: int = 0  # 0-100 weighted score; >75 suggests PLAY
     score_breakdown: Optional[Dict[str, Any]] = None  # optional component breakdown for transparency
+    # LLM-enhanced fields
+    enhanced_summary: Optional[str] = None  # LLM-generated natural language summary
+    market_narrative: Optional[str] = None  # LLM explanation of market conditions
+    trade_reasoning: Optional[str] = None  # LLM detailed reasoning
+    recommendations: Optional[str] = None  # LLM specific actionable recommendations
+    full_llm_analysis: Optional[str] = None  # Complete LLM response
 
 
 class TradeAnalyzer:
@@ -32,12 +38,31 @@ class TradeAnalyzer:
     def __init__(self, config_path: str = "config/config.yaml"):
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
-            
+
         self.analysis_config = self.config.get('analysis', {})
         self.enabled = self.analysis_config.get('enabled', True)
-        
-        # Would initialize LLM client here
-        # self.llm = Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+
+        # Initialize LLM client for enhanced explanations
+        self.llm_enabled = self.analysis_config.get('llm_enabled', True)
+        if self.llm_enabled:
+            try:
+                from anthropic import Anthropic
+                api_key = os.getenv('ANTHROPIC_API_KEY')
+                base_url = os.getenv('ANTHROPIC_BASE_URL')
+
+                if api_key:
+                    if base_url:
+                        self.llm = Anthropic(api_key=api_key, base_url=base_url)
+                    else:
+                        self.llm = Anthropic(api_key=api_key)
+
+                    self.llm_model = self.analysis_config.get('model', 'claude-sonnet-4-5')
+                else:
+                    self.llm_enabled = False
+                    print("Warning: ANTHROPIC_API_KEY not found, LLM features disabled")
+            except ImportError:
+                self.llm_enabled = False
+                print("Warning: anthropic package not installed, LLM features disabled")
     
     def analyze(
         self,
@@ -68,7 +93,7 @@ class TradeAnalyzer:
         )
         summary = self._generate_summary(trade, trade_plan)
         market_context_str = self._get_market_context(trade.ticker)
-        green_flags = self._check_green_flags(trade, trade_plan, current_price)
+        green_flags = self._check_green_flags(trade, trade_plan, current_price, market_context)
         
         # Calculate setup quality based on flags
         setup_quality = self._assess_setup_quality(red_flags, green_flags)
@@ -78,9 +103,20 @@ class TradeAnalyzer:
         
         # Weighted setup score 0-100 (40% rules/technicals, 30% Greeks, 20% sentiment proxy, 10% liquidity)
         setup_score, score_breakdown = self._calculate_setup_score(
-            trade, trade_plan, red_flags, green_flags, market_context
+            trade, trade_plan, red_flags, green_flags, market_context, current_price
         )
-        
+
+        # Generate LLM-enhanced analysis
+        llm_analysis = self._generate_llm_enhanced_analysis(
+            trade=trade,
+            trade_plan=trade_plan,
+            red_flags=red_flags,
+            green_flags=green_flags,
+            market_context=market_context,
+            setup_score=setup_score,
+            current_price=current_price
+        )
+
         return AnalysisResult(
             summary=summary,
             red_flags=red_flags,
@@ -90,6 +126,12 @@ class TradeAnalyzer:
             confidence=confidence,
             setup_score=setup_score,
             score_breakdown=score_breakdown,
+            # LLM-enhanced fields
+            enhanced_summary=llm_analysis.get('enhanced_summary'),
+            market_narrative=llm_analysis.get('market_narrative'),
+            trade_reasoning=llm_analysis.get('trade_reasoning'),
+            recommendations=llm_analysis.get('recommendations'),
+            full_llm_analysis=llm_analysis.get('full_analysis'),
         )
 
     def _check_red_flags(
@@ -308,33 +350,172 @@ class TradeAnalyzer:
                         })
                     break
 
+        # Counter-trend trade check
+        trend_analysis = ctx.get('trend_analysis', {})
+        if trend_analysis:
+            opt_type = (getattr(trade, "option_type", "CALL") or "CALL").upper()
+            trend_direction = trend_analysis.get('direction', 'unknown')
+            trend_cfg = self.analysis_config.get('trend', {})
+            counter_trend_severity = trend_cfg.get('counter_trend_severity', 'high')
+
+            if opt_type == 'CALL' and trend_direction == 'downtrend':
+                flags.append({
+                    "type": "counter_trend",
+                    "severity": counter_trend_severity,
+                    "message": f"Counter-trend trade: call entry in downtrend (strength: {trend_analysis.get('strength', 0)})"
+                })
+            elif opt_type == 'PUT' and trend_direction == 'uptrend':
+                flags.append({
+                    "type": "counter_trend",
+                    "severity": counter_trend_severity,
+                    "message": f"Counter-trend trade: put entry in uptrend (strength: {trend_analysis.get('strength', 0)})"
+                })
+
+        # VWAP deviation check
+        vol_analysis = ctx.get('volume_analysis', {})
+        if vol_analysis:
+            vwap_check = vol_analysis.get('vwap_check', {})
+            if vwap_check and vwap_check.get('signal') == 'mean_reversion_risk':
+                flags.append({
+                    "type": "vwap_deviation",
+                    "severity": "medium",
+                    "message": vwap_check.get('interpretation', 'Price far from VWAP - mean reversion risk')
+                })
+
+        # Volume divergence (strong move without volume)
+        if vol_analysis:
+            vol_conf = vol_analysis.get('volume_confirmation', {})
+            if vol_conf and not vol_conf.get('confirmed') and vol_conf.get('strength') == 'weak':
+                flags.append({
+                    "type": "volume_divergence",
+                    "severity": "medium",
+                    "message": vol_conf.get('reasoning', 'Price move not confirmed by volume')
+                })
+
+        # Bearish patterns (for calls) or Bullish patterns (for puts)
+        patterns = ctx.get('candlestick_patterns', [])
+        if patterns:
+            opt_type = (getattr(trade, "option_type", "CALL") or "CALL").upper()
+            for pattern in patterns:
+                # Conflicting pattern
+                if opt_type == 'CALL' and pattern.get('direction') == 'bearish':
+                    flags.append({
+                        "type": "conflicting_pattern",
+                        "severity": "medium",
+                        "message": f"Bearish {pattern.get('pattern')} pattern conflicts with call entry"
+                    })
+                elif opt_type == 'PUT' and pattern.get('direction') == 'bullish':
+                    flags.append({
+                        "type": "conflicting_pattern",
+                        "severity": "medium",
+                        "message": f"Bullish {pattern.get('pattern')} pattern conflicts with put entry"
+                    })
+
         return flags
     
-    def _check_green_flags(self, trade, trade_plan, current_price: float = None) -> List[Dict[str, str]]:
-        """Check for positive indicators"""
+    def _check_green_flags(self, trade, trade_plan, current_price: float = None,
+                           market_context: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
+        """Check for positive indicators including price action, volume, patterns, trend"""
         flags = []
-        
+        ctx = market_context or {}
+
         # Reasonable premium
         if trade.premium >= 1.0:
             flags.append({
                 "type": "premium",
                 "message": "Healthy premium for position sizing"
             })
-        
+
         # Good risk/reward from plan
         if trade_plan.target_1_r >= 2.0:
             flags.append({
                 "type": "risk_reward",
                 "message": f"Target at {trade_plan.target_1_r}R - favorable risk/reward"
             })
-        
+
         # Within risk parameters
         if trade_plan.go_no_go == "GO":
             flags.append({
                 "type": "rules_compliance",
                 "message": "Passes all rule-based checks"
             })
-        
+
+        # Price action: at strong support/resistance
+        sr_analysis = ctx.get('sr_analysis', {})
+        if sr_analysis:
+            opt_type = getattr(trade, 'option_type', 'CALL').upper()
+            if opt_type == 'CALL':
+                # Check if at support
+                nearest_support = sr_analysis.get('key_levels', {}).get('nearest_support')
+                if nearest_support and current_price:
+                    distance_pct = abs(current_price - nearest_support) / current_price * 100
+                    if distance_pct < 1.0:  # Within 1%
+                        flags.append({
+                            "type": "price_action",
+                            "message": f"Price at strong support ${nearest_support:.2f} - bounce opportunity"
+                        })
+            elif opt_type == 'PUT':
+                # Check if at resistance
+                nearest_resistance = sr_analysis.get('key_levels', {}).get('nearest_resistance')
+                if nearest_resistance and current_price:
+                    distance_pct = abs(current_price - nearest_resistance) / current_price * 100
+                    if distance_pct < 1.0:
+                        flags.append({
+                            "type": "price_action",
+                            "message": f"Price at strong resistance ${nearest_resistance:.2f} - reversal setup"
+                        })
+
+        # Candlestick patterns aligned with trade direction
+        patterns = ctx.get('candlestick_patterns', [])
+        if patterns:
+            opt_type = getattr(trade, 'option_type', 'CALL').upper()
+            for pattern in patterns:
+                if opt_type == 'CALL' and pattern.get('direction') == 'bullish':
+                    flags.append({
+                        "type": "pattern",
+                        "message": f"Bullish {pattern.get('pattern')} pattern detected (strength: {pattern.get('strength', 0):.0f}/100)"
+                    })
+                elif opt_type == 'PUT' and pattern.get('direction') == 'bearish':
+                    flags.append({
+                        "type": "pattern",
+                        "message": f"Bearish {pattern.get('pattern')} pattern detected (strength: {pattern.get('strength', 0):.0f}/100)"
+                    })
+
+        # Volume confirmation
+        vol_analysis = ctx.get('volume_analysis', {})
+        if vol_analysis:
+            vol_trend = vol_analysis.get('volume_trend', {})
+            if vol_trend.get('trend') == 'increasing' and vol_trend.get('strength') in ['strong', 'moderate']:
+                flags.append({
+                    "type": "volume",
+                    "message": f"Volume increasing ({vol_trend.get('change_pct', 0):.0f}%) - strong institutional interest"
+                })
+
+        # Trend alignment
+        trend_analysis = ctx.get('trend_analysis', {})
+        if trend_analysis:
+            opt_type = getattr(trade, 'option_type', 'CALL').upper()
+            trend_direction = trend_analysis.get('direction', 'unknown')
+
+            if opt_type == 'CALL' and trend_direction == 'uptrend':
+                flags.append({
+                    "type": "trend",
+                    "message": f"Aligned with uptrend (strength: {trend_analysis.get('strength', 0)}/100)"
+                })
+            elif opt_type == 'PUT' and trend_direction == 'downtrend':
+                flags.append({
+                    "type": "trend",
+                    "message": f"Aligned with downtrend (strength: {trend_analysis.get('strength', 0)}/100)"
+                })
+
+        # Multi-timeframe alignment
+        mtf_alignment = ctx.get('multi_timeframe_alignment', {})
+        if mtf_alignment and mtf_alignment.get('aligned'):
+            flags.append({
+                "type": "multi_timeframe",
+                "message": f"Multi-timeframe alignment: {mtf_alignment.get('direction')} across all timeframes"
+            })
+
         return flags
     
     def _generate_summary(self, trade, trade_plan) -> str:
@@ -350,6 +531,252 @@ class TradeAnalyzer:
         """Get current market context for ticker"""
         # Would fetch real data in production
         return f"No current market data for {ticker}"
+
+    def _generate_llm_enhanced_analysis(
+        self,
+        trade,
+        trade_plan,
+        red_flags: List,
+        green_flags: List,
+        market_context: Optional[Dict[str, Any]] = None,
+        setup_score: int = 0,
+        current_price: float = None
+    ) -> Dict[str, str]:
+        """
+        Generate LLM-enhanced natural language analysis.
+
+        Returns:
+            Dict with enhanced_summary, market_narrative, trade_reasoning, recommendations
+        """
+        if not self.llm_enabled:
+            return {
+                'enhanced_summary': self._generate_summary(trade, trade_plan),
+                'market_narrative': 'LLM analysis not available',
+                'trade_reasoning': 'Using rule-based analysis only',
+                'recommendations': 'N/A'
+            }
+
+        ctx = market_context or {}
+
+        # Build comprehensive context for LLM
+        analysis_data = {
+            'ticker': trade.ticker,
+            'option_type': getattr(trade, 'option_type', 'CALL'),
+            'strike': getattr(trade, 'strike', 0),
+            'premium': getattr(trade, 'premium', 0),
+            'current_price': current_price,
+            'setup_score': setup_score,
+            'red_flags': red_flags,
+            'green_flags': green_flags,
+        }
+
+        # Add technical analysis results
+        if ctx.get('sr_analysis'):
+            sr = ctx['sr_analysis']
+            analysis_data['support_resistance'] = {
+                'method': sr.get('method'),
+                'nearest_support': sr.get('key_levels', {}).get('nearest_support'),
+                'nearest_resistance': sr.get('key_levels', {}).get('nearest_resistance'),
+                'support_zones': len(sr.get('support_zones', [])),
+                'resistance_zones': len(sr.get('resistance_zones', [])),
+            }
+
+        if ctx.get('volume_analysis'):
+            vol = ctx['volume_analysis']
+            analysis_data['volume'] = {
+                'vwap': vol.get('vwap'),
+                'vwap_signal': vol.get('vwap_check', {}).get('signal'),
+                'volume_trend': vol.get('vol_trend', {}).get('trend'),
+                'volume_change_pct': vol.get('vol_trend', {}).get('change_pct'),
+            }
+
+        if ctx.get('candlestick_patterns'):
+            patterns = ctx['candlestick_patterns']
+            if patterns:
+                analysis_data['patterns'] = [
+                    {
+                        'name': p.get('pattern'),
+                        'direction': p.get('direction'),
+                        'strength': p.get('strength'),
+                        'volume_confirmed': p.get('volume_confirmed')
+                    }
+                    for p in patterns[-3:]  # Last 3 patterns
+                ]
+
+        if ctx.get('trend_analysis'):
+            trend = ctx['trend_analysis']
+            analysis_data['trend'] = {
+                'direction': trend.get('direction'),
+                'strength': trend.get('strength'),
+                'confidence': trend.get('confidence'),
+            }
+
+        # Create LLM prompt
+        prompt = self._build_analysis_prompt(analysis_data)
+
+        try:
+            # Call LLM
+            response = self.llm.messages.create(
+                model=self.llm_model,
+                max_tokens=2000,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            )
+
+            # Parse response
+            content = response.content[0].text
+
+            # Extract sections (assuming structured response)
+            sections = self._parse_llm_response(content)
+
+            return {
+                'enhanced_summary': sections.get('summary', content[:200]),
+                'market_narrative': sections.get('market_context', 'See analysis above'),
+                'trade_reasoning': sections.get('reasoning', 'See analysis above'),
+                'recommendations': sections.get('recommendations', 'See analysis above'),
+                'full_analysis': content
+            }
+
+        except Exception as e:
+            print(f"LLM analysis failed: {e}")
+            return {
+                'enhanced_summary': self._generate_summary(trade, trade_plan),
+                'market_narrative': 'LLM analysis unavailable',
+                'trade_reasoning': f"Error: {str(e)}",
+                'recommendations': 'Fallback to rule-based analysis'
+            }
+
+    def _build_analysis_prompt(self, data: Dict[str, Any]) -> str:
+        """Build comprehensive prompt for LLM analysis."""
+        prompt = f"""You are an expert options trader analyzing a trade setup. Provide a comprehensive analysis.
+
+TRADE SETUP:
+- Ticker: {data['ticker']}
+- Option: {data['option_type']} ${data['strike']}
+- Premium: ${data['premium']:.2f}
+- Current Price: ${data.get('current_price', 'N/A')}
+- Setup Score: {data['setup_score']}/100
+
+TECHNICAL ANALYSIS RESULTS:
+"""
+
+        # Support/Resistance
+        if 'support_resistance' in data:
+            sr = data['support_resistance']
+            prompt += f"""
+Support/Resistance Analysis:
+- Method: {sr['method']}
+- Nearest Support: ${sr.get('nearest_support', 'N/A')}
+- Nearest Resistance: ${sr.get('nearest_resistance', 'N/A')}
+- Support zones found: {sr['support_zones']}
+- Resistance zones found: {sr['resistance_zones']}
+"""
+
+        # Volume
+        if 'volume' in data:
+            vol = data['volume']
+            prompt += f"""
+Volume Analysis:
+- VWAP: ${vol.get('vwap', 'N/A')}
+- Signal: {vol.get('vwap_signal', 'N/A')}
+- Volume Trend: {vol.get('volume_trend', 'N/A')} ({vol.get('volume_change_pct', 0):.1f}%)
+"""
+
+        # Patterns
+        if 'patterns' in data:
+            prompt += "\nCandlestick Patterns:\n"
+            for p in data['patterns']:
+                vol_conf = "✓" if p['volume_confirmed'] else "✗"
+                prompt += f"- {p['name']}: {p['direction']} (strength: {p['strength']}/100, volume: {vol_conf})\n"
+
+        # Trend
+        if 'trend' in data:
+            trend = data['trend']
+            prompt += f"""
+Trend Analysis:
+- Direction: {trend['direction']}
+- Strength: {trend['strength']}/100
+- Confidence: {trend['confidence']}%
+"""
+
+        # Red Flags
+        prompt += f"\nRED FLAGS ({len(data['red_flags'])}):\n"
+        for flag in data['red_flags']:
+            prompt += f"- [{flag['severity'].upper()}] {flag['message']}\n"
+
+        # Green Flags
+        prompt += f"\nGREEN FLAGS ({len(data['green_flags'])}):\n"
+        for flag in data['green_flags']:
+            prompt += f"- {flag['message']}\n"
+
+        prompt += """
+Please provide a structured analysis in the following format:
+
+## SUMMARY
+[2-3 sentence overview of the trade setup]
+
+## MARKET CONTEXT
+[Explain what the technical analysis reveals about current market conditions, price action, volume, and trend. Why is the price where it is? What's the market telling us?]
+
+## TRADE REASONING
+[Explain why this trade has the score it does. Address the red flags and green flags. What are the specific risks? What are the potential catalysts? For counter-trend trades, explain the reversal thesis or warn about fighting the trend.]
+
+## RECOMMENDATIONS
+[Specific, actionable recommendations:
+- Should they take this trade? At what size?
+- What should they watch for?
+- Entry strategy (now vs wait for confirmation)?
+- What would make you change your mind?
+- Specific price levels to monitor]
+
+Be direct, specific, and practical. Focus on actionable insights based on the technical analysis provided.
+"""
+
+        return prompt
+
+    def _parse_llm_response(self, content: str) -> Dict[str, str]:
+        """Parse structured LLM response into sections."""
+        sections = {}
+
+        # Simple parsing - look for section headers
+        current_section = None
+        current_content = []
+
+        for line in content.split('\n'):
+            line = line.strip()
+
+            if line.startswith('## SUMMARY'):
+                if current_section and current_content:
+                    sections[current_section] = '\n'.join(current_content).strip()
+                current_section = 'summary'
+                current_content = []
+            elif line.startswith('## MARKET CONTEXT'):
+                if current_section and current_content:
+                    sections[current_section] = '\n'.join(current_content).strip()
+                current_section = 'market_context'
+                current_content = []
+            elif line.startswith('## TRADE REASONING'):
+                if current_section and current_content:
+                    sections[current_section] = '\n'.join(current_content).strip()
+                current_section = 'reasoning'
+                current_content = []
+            elif line.startswith('## RECOMMENDATIONS'):
+                if current_section and current_content:
+                    sections[current_section] = '\n'.join(current_content).strip()
+                current_section = 'recommendations'
+                current_content = []
+            elif line and not line.startswith('##'):
+                current_content.append(line)
+
+        # Add last section
+        if current_section and current_content:
+            sections[current_section] = '\n'.join(current_content).strip()
+
+        return sections
     
     def _assess_setup_quality(self, red_flags: List, green_flags: List) -> str:
         """Assess overall setup quality"""
@@ -389,6 +816,7 @@ class TradeAnalyzer:
         red_flags: List,
         green_flags: List,
         market_context: Optional[Dict[str, Any]] = None,
+        current_price: float = None,
     ) -> tuple:
         """
         Weighted setup score 0-100. Threshold >75 for PLAY.
@@ -468,6 +896,84 @@ class TradeAnalyzer:
             if abs(theta) / prem >= 0.20:
                 theta_risk_adj = -6
                 base -= 6
+
+        # NEW: Price action bonus (at strong S/R zone)
+        price_action_bonus = 0
+        sr_analysis = ctx.get('sr_analysis', {})
+        if sr_analysis and current_price:
+            opt_type = (getattr(trade, 'option_type', 'CALL') or 'CALL').upper()
+            key_levels = sr_analysis.get('key_levels', {})
+
+            if opt_type == 'CALL':
+                nearest_support = key_levels.get('nearest_support')
+                if nearest_support:
+                    distance_pct = abs(current_price - nearest_support) / current_price * 100
+                    if distance_pct < 1.0:
+                        price_action_bonus = 10
+                        base += 10
+            elif opt_type == 'PUT':
+                nearest_resistance = key_levels.get('nearest_resistance')
+                if nearest_resistance:
+                    distance_pct = abs(current_price - nearest_resistance) / current_price * 100
+                    if distance_pct < 1.0:
+                        price_action_bonus = 10
+                        base += 10
+
+        # NEW: Candlestick pattern bonus
+        pattern_bonus = 0
+        patterns_cfg = self.analysis_config.get('patterns', {})
+        bonus_at_sr = patterns_cfg.get('bonus_at_sr', 10)
+        patterns = ctx.get('candlestick_patterns', [])
+        if patterns:
+            opt_type = (getattr(trade, 'option_type', 'CALL') or 'CALL').upper()
+            for pattern in patterns:
+                if opt_type == 'CALL' and pattern.get('direction') == 'bullish':
+                    pattern_bonus = bonus_at_sr
+                    base += bonus_at_sr
+                    break
+                elif opt_type == 'PUT' and pattern.get('direction') == 'bearish':
+                    pattern_bonus = bonus_at_sr
+                    base += bonus_at_sr
+                    break
+
+        # NEW: Multi-timeframe alignment bonus
+        mtf_bonus = 0
+        trend_cfg = self.analysis_config.get('trend', {})
+        alignment_bonus_cfg = trend_cfg.get('alignment_bonus', 15)
+        mtf_alignment = ctx.get('multi_timeframe_alignment', {})
+        if mtf_alignment and mtf_alignment.get('aligned'):
+            opt_type = (getattr(trade, 'option_type', 'CALL') or 'CALL').upper()
+            mtf_direction = mtf_alignment.get('direction', '')
+
+            if (opt_type == 'CALL' and mtf_direction == 'uptrend') or \
+               (opt_type == 'PUT' and mtf_direction == 'downtrend'):
+                mtf_bonus = alignment_bonus_cfg
+                base += alignment_bonus_cfg
+
+        # NEW: Volume confirmation bonus
+        volume_bonus = 0
+        vol_analysis = ctx.get('volume_analysis', {})
+        if vol_analysis:
+            vol_conf = vol_analysis.get('volume_confirmation', {})
+            if vol_conf and vol_conf.get('confirmed') and vol_conf.get('strength') == 'strong':
+                volume_bonus = 5
+                base += 5
+
+        # Counter-trend penalty (already in reds, but emphasize here)
+        counter_trend_penalty = 0
+        trend_analysis = ctx.get('trend_analysis', {})
+        if trend_analysis:
+            opt_type = (getattr(trade, 'option_type', 'CALL') or 'CALL').upper()
+            trend_direction = trend_analysis.get('direction', 'unknown')
+
+            if (opt_type == 'CALL' and trend_direction == 'downtrend') or \
+               (opt_type == 'PUT' and trend_direction == 'uptrend'):
+                # Additional penalty if not already in red flags
+                has_counter_trend_flag = any(f.get('type') == 'counter_trend' for f in red_flags)
+                if not has_counter_trend_flag:
+                    counter_trend_penalty = -10
+                    base -= 10
+
         score = max(0, min(100, int(base)))
         breakdown = {
             "base": 70,
@@ -479,6 +985,11 @@ class TradeAnalyzer:
             "technical": technical,
             "events": events_adj,
             "theta_risk": theta_risk_adj,
+            "price_action": price_action_bonus,
+            "pattern": pattern_bonus,
+            "mtf_alignment": mtf_bonus,
+            "volume": volume_bonus,
+            "counter_trend": counter_trend_penalty,
         }
         return score, breakdown
 
