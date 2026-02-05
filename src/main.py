@@ -443,6 +443,134 @@ def run_analysis(
             if verbose:
                 print(f"[verbose] ATR block skipped: {e}", file=sys.stderr)
 
+    # Enhanced Technical Analysis (Phase 1-4: Price Action, Volume, Patterns, Trend)
+    if not no_market and current_price and trade.ticker:
+        try:
+            import yaml
+            with open(config_path, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+
+            analysis_cfg = cfg.get("analysis", {})
+
+            # Fetch historical OHLC data for technical analysis
+            from market_data.market_data import get_historical_data
+            hist_df = get_historical_data(trade.ticker, period="3mo", interval="1d")
+
+            if hist_df is not None and len(hist_df) >= 20:
+                # Get ATR if not already calculated
+                atr = market_context.get("atr")
+                if atr is None:
+                    from market_data.market_data import get_atr
+                    atr = get_atr(trade.ticker, period=14, days_back=60)
+                    if atr:
+                        market_context["atr"] = round(atr, 2)
+
+                # Phase 1: Price Action S/R Analysis
+                sr_cfg = analysis_cfg.get("support_resistance", {})
+                if sr_cfg.get("enabled", True):
+                    try:
+                        from analysis.price_action import calculate_support_resistance_zones
+                        sr_zones = calculate_support_resistance_zones(
+                            hist_df,
+                            current_price,
+                            ticker=trade.ticker,
+                            lookback_days=sr_cfg.get("lookback_days", 60),
+                            swing_window=5,
+                            min_touches=sr_cfg.get("min_touches", 2),
+                            zone_clustering_pct=sr_cfg.get("zone_clustering_pct", 0.5),
+                            atr=atr,
+                            max_levels=sr_cfg.get("max_levels", 5)
+                        )
+                        if sr_zones:
+                            market_context["sr_analysis"] = sr_zones
+                    except Exception as e:
+                        if verbose:
+                            print(f"[verbose] Price action analysis skipped: {e}", file=sys.stderr)
+
+                # Phase 2: Volume Analysis
+                vol_cfg = analysis_cfg.get("volume", {})
+                if vol_cfg.get("enabled", True):
+                    try:
+                        from analysis.volume_analysis import (
+                            calculate_vwap,
+                            build_volume_profile,
+                            check_price_vs_vwap,
+                            analyze_volume_trend
+                        )
+
+                        # VWAP
+                        if vol_cfg.get("vwap_enabled", True):
+                            vwap = calculate_vwap(hist_df)
+                            if vwap:
+                                market_context["vwap"] = round(vwap, 2)
+                                vwap_position = check_price_vs_vwap(current_price, vwap)
+                                if vwap_position:
+                                    market_context["vwap_position"] = vwap_position
+
+                        # Volume Profile
+                        if vol_cfg.get("volume_profile_enabled", True):
+                            vol_profile = build_volume_profile(
+                                hist_df,
+                                price_bins=vol_cfg.get("price_bins", 50),
+                                value_area_pct=0.70
+                            )
+                            if vol_profile:
+                                market_context["volume_profile"] = vol_profile
+
+                        # Volume Trend
+                        vol_trend = analyze_volume_trend(hist_df, lookback=20)
+                        if vol_trend:
+                            market_context["volume_trend"] = vol_trend
+
+                    except Exception as e:
+                        if verbose:
+                            print(f"[verbose] Volume analysis skipped: {e}", file=sys.stderr)
+
+                # Phase 3: Candlestick Pattern Recognition
+                pattern_cfg = analysis_cfg.get("patterns", {})
+                if pattern_cfg.get("enabled", True):
+                    try:
+                        from analysis.candlestick_patterns import get_pattern_signals
+                        patterns = get_pattern_signals(
+                            trade.ticker,
+                            lookback=pattern_cfg.get("lookback_bars", 10),
+                            require_volume_confirmation=pattern_cfg.get("require_volume_confirmation", True),
+                            df=hist_df
+                        )
+                        if patterns:
+                            market_context["candlestick_patterns"] = patterns
+                    except Exception as e:
+                        if verbose:
+                            print(f"[verbose] Pattern analysis skipped: {e}", file=sys.stderr)
+
+                # Phase 4: Trend Analysis
+                trend_cfg = analysis_cfg.get("trend", {})
+                if trend_cfg.get("enabled", True):
+                    try:
+                        from analysis.trend_analysis import identify_trend, calculate_adx
+
+                        # Identify trend structure
+                        trend = identify_trend(
+                            hist_df,
+                            method="swing_points",
+                            adx_threshold=trend_cfg.get("adx_trending_threshold", 25)
+                        )
+                        if trend:
+                            market_context["trend_analysis"] = trend
+
+                        # Calculate ADX
+                        adx = calculate_adx(hist_df, period=trend_cfg.get("adx_period", 14))
+                        if adx:
+                            market_context["adx"] = round(adx, 1)
+
+                    except Exception as e:
+                        if verbose:
+                            print(f"[verbose] Trend analysis skipped: {e}", file=sys.stderr)
+
+        except Exception as e:
+            if verbose:
+                print(f"[verbose] Enhanced technical analysis skipped: {e}", file=sys.stderr)
+
     # Rule-based plan (ODE params applied automatically when is_ode)
     engine = RiskEngine(config_path)
     trade_plan = engine.create_trade_plan(trade, current_price=current_price, market_context=market_context)

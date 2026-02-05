@@ -834,7 +834,7 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
         Returns (score, breakdown_dict) for transparency.
         """
         ctx = market_context or {}
-        base = 70
+        base = 50  # Changed from 70 to make scoring more meaningful
         rules = 0
         if trade_plan.go_no_go == "GO":
             rules = 10
@@ -920,20 +920,20 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
                 if nearest_support:
                     distance_pct = abs(current_price - nearest_support) / current_price * 100
                     if distance_pct < 1.0:
-                        price_action_bonus = 10
-                        base += 10
+                        price_action_bonus = 15  # Increased from 10
+                        base += 15
             elif opt_type == 'PUT':
                 nearest_resistance = key_levels.get('nearest_resistance')
                 if nearest_resistance:
                     distance_pct = abs(current_price - nearest_resistance) / current_price * 100
                     if distance_pct < 1.0:
-                        price_action_bonus = 10
-                        base += 10
+                        price_action_bonus = 15  # Increased from 10
+                        base += 15
 
         # NEW: Candlestick pattern bonus
         pattern_bonus = 0
         patterns_cfg = self.analysis_config.get('patterns', {})
-        bonus_at_sr = patterns_cfg.get('bonus_at_sr', 10)
+        bonus_at_sr = patterns_cfg.get('bonus_at_sr', 12)  # Increased from 10
         patterns = ctx.get('candlestick_patterns', [])
         if patterns:
             opt_type = (getattr(trade, 'option_type', 'CALL') or 'CALL').upper()
@@ -950,7 +950,7 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
         # NEW: Multi-timeframe alignment bonus
         mtf_bonus = 0
         trend_cfg = self.analysis_config.get('trend', {})
-        alignment_bonus_cfg = trend_cfg.get('alignment_bonus', 15)
+        alignment_bonus_cfg = trend_cfg.get('alignment_bonus', 20)  # Increased from 15
         mtf_alignment = ctx.get('multi_timeframe_alignment', {})
         if mtf_alignment and mtf_alignment.get('aligned'):
             opt_type = (getattr(trade, 'option_type', 'CALL') or 'CALL').upper()
@@ -963,10 +963,10 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
 
         # NEW: Volume confirmation bonus
         volume_bonus = 0
-        vol_analysis = ctx.get('volume_analysis', {})
-        if vol_analysis:
-            vol_conf = vol_analysis.get('volume_confirmation', {})
-            if vol_conf and vol_conf.get('confirmed') and vol_conf.get('strength') == 'strong':
+        vol_trend = ctx.get('volume_trend', {})
+        if vol_trend:
+            # Check for strong volume trend (increasing with strong strength)
+            if vol_trend.get('trend') == 'increasing' and vol_trend.get('strength') in ['strong', 'moderate']:
                 volume_bonus = 5
                 base += 5
 
@@ -979,15 +979,13 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
 
             if (opt_type == 'CALL' and trend_direction == 'downtrend') or \
                (opt_type == 'PUT' and trend_direction == 'uptrend'):
-                # Additional penalty if not already in red flags
-                has_counter_trend_flag = any(f.get('type') == 'counter_trend' for f in red_flags)
-                if not has_counter_trend_flag:
-                    counter_trend_penalty = -10
-                    base -= 10
+                # Always apply counter-trend penalty (critical risk factor)
+                counter_trend_penalty = -10
+                base -= 10
 
         score = max(0, min(100, int(base)))
         breakdown = {
-            "base": 70,
+            "base": 50,  # Updated from 70
             "rules": rules,
             "greens": greens,
             "reds": reds,

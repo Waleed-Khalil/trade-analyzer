@@ -171,6 +171,49 @@ def get_news_context(ticker: str, max_results: int = 5) -> List[Dict[str, str]]:
         return []
 
 
+def get_historical_data(
+    ticker: str,
+    period: str = "3mo",
+    interval: str = "1d"
+) -> Optional[Any]:
+    """
+    Fetch OHLC historical data for technical analysis.
+
+    Args:
+        ticker: Stock symbol
+        period: Data period (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, max)
+        interval: Data interval (1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo)
+
+    Returns:
+        DataFrame with standardized lowercase columns (open, high, low, close, volume)
+        or None if fetch fails
+    """
+    try:
+        import yfinance as yf
+        import pandas as pd
+
+        ticker_obj = yf.Ticker(ticker)
+        df = ticker_obj.history(period=period, interval=interval)
+
+        if df is None or df.empty or len(df) < 5:
+            return None
+
+        # Standardize column names to lowercase
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [str(col).lower() for col in df.columns]
+
+        # Ensure required columns exist
+        required = ['open', 'high', 'low', 'close', 'volume']
+        if not all(col in df.columns for col in required):
+            return None
+
+        return df
+
+    except Exception:
+        return None
+
+
 def get_atr(
     ticker: str,
     period: int = 14,

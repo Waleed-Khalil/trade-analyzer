@@ -126,7 +126,7 @@ analysis:
     lookback_bars: 10
     detect_patterns: ["engulfing", "pinbar", "doji", "morning_star", "evening_star", "hammer", "shooting_star"]
     require_volume_confirmation: true
-    bonus_at_sr: 10  # Bonus to setup_score when pattern at S/R
+    bonus_at_sr: 12  # Bonus to setup_score when pattern at S/R (increased from 10)
 
   # Trend analysis (ADX, structure, multi-timeframe)
   trend:
@@ -135,7 +135,7 @@ analysis:
     adx_trending_threshold: 25
     adx_weak_threshold: 20
     multi_timeframe: [daily, 4h, 1h]
-    alignment_bonus: 15  # Bonus to setup_score for multi-TF alignment
+    alignment_bonus: 20  # Bonus to setup_score for multi-TF alignment (increased from 15)
     counter_trend_severity: "high"  # Severity for counter-trend trades
     trendline_min_touches: 2
 
