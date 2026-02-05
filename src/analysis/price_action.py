@@ -198,7 +198,9 @@ def _calculate_zone_strength(levels: List[Dict], total_touches: int,
         score += volume_score
 
     # Recency component (0-30 points)
-    days_ago = (datetime.now() - last_touch).days
+    # Handle timezone-aware datetime
+    now = pd.Timestamp.now(tz=last_touch.tzinfo if hasattr(last_touch, 'tzinfo') else None)
+    days_ago = (now - last_touch).days
     if days_ago < 7:
         recency_score = 30
     elif days_ago < 30:
@@ -253,6 +255,9 @@ def calculate_support_resistance_zones(
     if lookback_days > 0:
         cutoff_date = datetime.now() - timedelta(days=lookback_days)
         if isinstance(df.index, pd.DatetimeIndex):
+            # Handle timezone-aware index
+            if df.index.tz is not None:
+                cutoff_date = pd.Timestamp(cutoff_date).tz_localize(df.index.tz)
             df = df[df.index >= cutoff_date]
 
     # Find swing points
@@ -412,11 +417,15 @@ def check_level_quality(
     Returns:
         Dict with quality assessment
     """
+    # Handle timezone-aware datetime for recency calculation
+    last_touch = level.get('last_touch', pd.Timestamp.now())
+    now = pd.Timestamp.now(tz=last_touch.tzinfo if hasattr(last_touch, 'tzinfo') else None)
+
     quality = {
         'is_valid': True,
         'strength': level.get('strength', 0),
         'touches': level.get('touches', 0),
-        'recency_days': (datetime.now() - level.get('last_touch', datetime.now())).days,
+        'recency_days': (now - last_touch).days,
         'distance_atr': None,
         'assessment': 'unknown',
     }

@@ -500,8 +500,10 @@ def run_analysis(
 
                         # VWAP
                         if vol_cfg.get("vwap_enabled", True):
-                            vwap = calculate_vwap(hist_df)
-                            if vwap:
+                            vwap_series = calculate_vwap(hist_df)
+                            if not vwap_series.empty and len(vwap_series) > 0:
+                                # Get the most recent VWAP value
+                                vwap = float(vwap_series.iloc[-1])
                                 market_context["vwap"] = round(vwap, 2)
                                 vwap_position = check_price_vs_vwap(current_price, vwap)
                                 if vwap_position:
@@ -518,7 +520,7 @@ def run_analysis(
                                 market_context["volume_profile"] = vol_profile
 
                         # Volume Trend
-                        vol_trend = analyze_volume_trend(hist_df, lookback=20)
+                        vol_trend = analyze_volume_trend(hist_df, period=20)
                         if vol_trend:
                             market_context["volume_trend"] = vol_trend
 
@@ -532,10 +534,9 @@ def run_analysis(
                     try:
                         from analysis.candlestick_patterns import get_pattern_signals
                         patterns = get_pattern_signals(
-                            trade.ticker,
+                            hist_df,
                             lookback=pattern_cfg.get("lookback_bars", 10),
-                            require_volume_confirmation=pattern_cfg.get("require_volume_confirmation", True),
-                            df=hist_df
+                            require_volume_confirmation=pattern_cfg.get("require_volume_confirmation", True)
                         )
                         if patterns:
                             market_context["candlestick_patterns"] = patterns
@@ -559,9 +560,12 @@ def run_analysis(
                             market_context["trend_analysis"] = trend
 
                         # Calculate ADX
-                        adx = calculate_adx(hist_df, period=trend_cfg.get("adx_period", 14))
-                        if adx:
-                            market_context["adx"] = round(adx, 1)
+                        adx_series = calculate_adx(hist_df, period=trend_cfg.get("adx_period", 14))
+                        if not adx_series.empty and len(adx_series) > 0:
+                            # Get the most recent ADX value
+                            adx = float(adx_series.iloc[-1])
+                            if not np.isnan(adx):
+                                market_context["adx"] = round(adx, 1)
 
                     except Exception as e:
                         if verbose:
