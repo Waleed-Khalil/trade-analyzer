@@ -16,9 +16,28 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+import yaml
+
 from market_data.market_data import get_market_context
 from parser.trade_parser import TradeParser
 from scripts.telegram_alerts import send_telegram_alert, should_send_alert
+
+
+# Load target_profit_pct from config.yaml
+def _load_target_profit_pct():
+    config_path = PROJECT_ROOT / "config" / "config.yaml"
+    try:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        targets = cfg.get("targets", {})
+        enabled = targets.get("target_profit_pct_enabled", False)
+        pct = targets.get("target_profit_pct", 0.20)
+        return pct if enabled else None
+    except Exception:
+        return None
+
+
+_TARGET_PROFIT_PCT = _load_target_profit_pct()
 
 
 # Configuration
@@ -26,6 +45,7 @@ CONFIG = {
     "panic_loss_pct": -25,      # Exit panic threshold
     "warning_loss_pct": -15,     # Warning threshold
     "profit_protection_pct": 20, # Trail to breakeven when up 20%
+    "target_profit_pct": (_TARGET_PROFIT_PCT * 100) if _TARGET_PROFIT_PCT else 20,  # From config
     "close_hour": 15,           # After 3 PM ET, tighten stops
     "support_breach_tolerance": 0.5,  # Allow X% below support before warning
     "reversal_detection_window": 3,  # Check last N checks for reversal
@@ -256,6 +276,31 @@ def check_profit_protection(trade, prices, current_option_price):
     return alerts
 
 
+def check_profit_target(trade, prices, current_option_price):
+    """Check if premium profit target (e.g. +20%) has been hit."""
+    alerts = []
+    ticker = trade["ticker"]
+    entry = trade["entry"]
+    current = current_option_price
+    target_pct = CONFIG["target_profit_pct"]
+
+    profit_pct = (current - entry) / entry * 100
+
+    if profit_pct >= target_pct and not trade.get("target_hit"):
+        contracts = trade.get("contracts", 1)
+        half = max(1, contracts // 2)
+        alerts.append({
+            "type": "PROFIT_TARGET_HIT",
+            "level": target_pct,
+            "current": current,
+            "message": f"TARGET HIT: {ticker} up {profit_pct:.1f}% -- take {half} of {contracts} contracts, trail rest at breakeven",
+            "action": f"SELL {half} contracts, move stop to ${entry:.2f}",
+            "urgency": "medium",
+        })
+
+    return alerts
+
+
 def check_thresholds(trade, prices):
     """Check if resistance or target levels are hit."""
     alerts = []
@@ -392,7 +437,10 @@ def main():
             
             # 4. Check profit protection (trailing stop)
             alerts.extend(check_profit_protection(trade, prices, option_price))
-            
+
+            # 4b. Check percentage profit target (+20%)
+            alerts.extend(check_profit_target(trade, prices, option_price))
+
             # 5. Check resistance/target
             alerts.extend(check_thresholds(trade, prices))
             

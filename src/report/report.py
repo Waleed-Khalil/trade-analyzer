@@ -53,7 +53,12 @@ def print_analysis_report(
     r_mult = getattr(trade_plan, "target_1_r", None)
     if r_mult is not None:
         summary_parts.append(f"R:R 1:{r_mult:.1f}")
-    summary_parts.append("[PLAY]" if rec in ("PLAY", "GO") else "[DON'T PLAY]")
+    # Use tier label if available from analysis, else binary
+    tier_label = getattr(analysis, "recommendation_tier", "") if analysis else ""
+    if tier_label:
+        summary_parts.append(f"[{tier_label}]")
+    else:
+        summary_parts.append("[PLAY]" if rec in ("PLAY", "GO") else "[DON'T PLAY]")
     print("  " + " | ".join(summary_parts))
     print()
 
@@ -308,10 +313,18 @@ def print_analysis_report(
     # AI RECOMMENDATION - DETAILED
     # ============================================================
     rec = getattr(recommendation, "recommendation", trade_plan.go_no_go)
-    emoji = "[PLAY]" if rec in ("PLAY", "GO") else "[DON'T PLAY]"
-    
+    tier_label = getattr(analysis, "recommendation_tier", "") if analysis else ""
+    tier_guidance = getattr(analysis, "recommendation_guidance", "") if analysis else ""
+
+    if tier_label:
+        emoji = f"[{tier_label}]"
+    else:
+        emoji = "[PLAY]" if rec in ("PLAY", "GO") else "[DON'T PLAY]"
+
     print(sep)
     print(f"  {emoji}")
+    if tier_guidance:
+        print(f"  Strategy: {tier_guidance}")
     print(sep)
     
     # WHY - Detailed reasoning
@@ -426,7 +439,14 @@ def print_analysis_report(
     else:
         print("  TAKE-PROFIT LEVELS")
         print(sub)
-        print(f"  T1: ${trade_plan.target_1} ({trade_plan.target_1_r}R)")
+        # Show percentage target label if available from market_context
+        t1_label = None
+        if market_context and isinstance(market_context, dict):
+            t1_label = market_context.get('target_1_label')
+        if t1_label:
+            print(f"  T1: ${trade_plan.target_1} ({t1_label})")
+        else:
+            print(f"  T1: ${trade_plan.target_1} ({trade_plan.target_1_r}R)")
         if trade_plan.runner_contracts:
             print(f"  Runner: {trade_plan.runner_contracts} @ ${trade_plan.runner_target}")
     
@@ -529,10 +549,18 @@ def print_analysis_report(
             parts = [f"{b['base']} base", f"+{b['rules']} rules", f"+{b['greens']} greens",
                      f"{b['reds']} reds", f"{b['pop']:+d} pop", f"+{b['liquidity']} liq",
                      f"+{b['technical']} tech"]
-            if "events" in b:
+            if "events" in b and b.get("events", 0) != 0:
                 parts.append(f"{b['events']} events")
             if "theta_risk" in b and b["theta_risk"] != 0:
                 parts.append(f"{b['theta_risk']} theta")
+            if b.get("price_action", 0) != 0:
+                parts.append(f"+{b['price_action']} S/R")
+            if b.get("pattern", 0) != 0:
+                parts.append(f"+{b['pattern']} pattern")
+            if b.get("mtf_alignment", 0) != 0:
+                parts.append(f"+{b['mtf_alignment']} MTF")
+            if b.get("volume", 0) != 0:
+                parts.append(f"+{b['volume']} vol")
             print("  " + " ".join(parts) + f" = {score}")
         if analysis.green_flags:
             print("  [+] " + ", ".join(f.get("message", "") for f in analysis.green_flags if f.get("message")))

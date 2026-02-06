@@ -21,6 +21,8 @@ class AnalysisResult:
     confidence: float  # 0.0 to 1.0
     setup_score: int = 0  # 0-100 weighted score; >75 suggests PLAY
     score_breakdown: Optional[Dict[str, Any]] = None  # optional component breakdown for transparency
+    recommendation_tier: str = ""  # STRONG PLAY, PLAY, CAUTIOUS PLAY, SKIP
+    recommendation_guidance: str = ""  # Strategy guidance for the tier
     # LLM-enhanced fields
     enhanced_summary: Optional[str] = None  # LLM-generated natural language summary
     market_narrative: Optional[str] = None  # LLM explanation of market conditions
@@ -117,6 +119,9 @@ class TradeAnalyzer:
             current_price=current_price
         )
 
+        # Get recommendation tier based on score
+        tier_label, tier_guidance = self._get_recommendation_tier(setup_score)
+
         return AnalysisResult(
             summary=summary,
             red_flags=red_flags,
@@ -126,6 +131,8 @@ class TradeAnalyzer:
             confidence=confidence,
             setup_score=setup_score,
             score_breakdown=score_breakdown,
+            recommendation_tier=tier_label,
+            recommendation_guidance=tier_guidance,
             # LLM-enhanced fields
             enhanced_summary=llm_analysis.get('enhanced_summary'),
             market_narrative=llm_analysis.get('market_narrative'),
@@ -820,6 +827,38 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
         
         return max(0.0, min(base, 1.0))
 
+    def _get_recommendation_tier(self, score: int) -> tuple:
+        """
+        Return (tier_label, guidance_string) based on score and config thresholds.
+        """
+        scoring_cfg = self.analysis_config.get('scoring', {})
+        tiers = scoring_cfg.get('recommendation_tiers', {})
+
+        strong_min = tiers.get('strong_play_min', 85)
+        play_min = tiers.get('play_min', 70)
+        cautious_min = tiers.get('cautious_play_min', 55)
+
+        if score >= strong_min:
+            return (
+                tiers.get('strong_play_label', 'STRONG PLAY'),
+                tiers.get('strong_play_guidance', 'Full size. Let winners run past +20%. Trail with breakeven stop after T1.'),
+            )
+        elif score >= play_min:
+            return (
+                tiers.get('play_label', 'PLAY'),
+                tiers.get('play_guidance', 'Normal size. Take 50% at +20%, trail rest with breakeven stop.'),
+            )
+        elif score >= cautious_min:
+            return (
+                tiers.get('cautious_play_label', 'CAUTIOUS PLAY'),
+                tiers.get('cautious_play_guidance', 'Reduced size. Tight stop. Take +20% on full position.'),
+            )
+        else:
+            return (
+                tiers.get('skip_label', 'SKIP'),
+                tiers.get('skip_guidance', 'Setup quality too low. Wait for better entry.'),
+            )
+
     def _calculate_setup_score(
         self,
         trade,
@@ -830,25 +869,55 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
         current_price: float = None,
     ) -> tuple:
         """
-        Weighted setup score 0-100. Threshold >75 for PLAY.
+        Weighted setup score 0-100 with config-driven penalties/bonuses.
         Returns (score, breakdown_dict) for transparency.
         """
         ctx = market_context or {}
-        base = 50  # Changed from 70 to make scoring more meaningful
+        scoring_cfg = self.analysis_config.get('scoring', {})
+
+        # Config-driven base and penalty values
+        base_start = scoring_cfg.get('base_score', 55)
+        high_penalty = scoring_cfg.get('high_severity_penalty', 10)
+        std_med_penalty = scoring_cfg.get('standard_medium_penalty', 4)
+        hi_impact_med_penalty = scoring_cfg.get('high_impact_medium_penalty', 6)
+        lo_impact_med_penalty = scoring_cfg.get('low_impact_medium_penalty', 2)
+        hi_impact_flags = scoring_cfg.get('high_impact_medium_flags', ['stale_premium', 'wide_spread', 'stress_test', 'theta_risk'])
+        lo_impact_flags = scoring_cfg.get('low_impact_medium_flags', ['macd_bearish', 'vwap_deviation', 'volume_divergence'])
+        green_pts = scoring_cfg.get('green_flag_points', 4)
+        green_max = scoring_cfg.get('green_flag_max', 20)
+
+        base = base_start
+
+        # GO bonus
         rules = 0
         if trade_plan.go_no_go == "GO":
             rules = 10
             base += rules
-        greens = min(len(green_flags) * 3, 15)
+
+        # Green flags (config-driven points and cap)
+        greens = min(len(green_flags) * green_pts, green_max)
         base += greens
+
+        # Red flags with tiered penalties
         reds = 0
         for f in red_flags:
-            if f.get("severity") == "high":
-                reds -= 12
-                base -= 12
-            elif f.get("severity") == "medium":
-                reds -= 6
-                base -= 6
+            severity = f.get("severity", "low")
+            flag_type = f.get("type", "")
+            if severity == "high":
+                reds -= high_penalty
+                base -= high_penalty
+            elif severity == "medium":
+                if flag_type in hi_impact_flags:
+                    reds -= hi_impact_med_penalty
+                    base -= hi_impact_med_penalty
+                elif flag_type in lo_impact_flags:
+                    reds -= lo_impact_med_penalty
+                    base -= lo_impact_med_penalty
+                else:
+                    reds -= std_med_penalty
+                    base -= std_med_penalty
+
+        # PoP adjustment
         pop_adj = 0
         pop = ctx.get("probability_of_profit")
         if pop is not None and pop >= 0.60:
@@ -857,6 +926,8 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
         elif pop is not None and pop < 0.50:
             pop_adj = -5
             base -= 5
+
+        # Liquidity adjustment
         liquidity = 0
         greeks_cfg = self.analysis_config.get("greeks", {})
         oi_min = greeks_cfg.get("open_interest_min", 1000)
@@ -868,26 +939,44 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
         elif ctx.get("open_interest", 0) >= oi_min and ctx.get("option_volume", 0) >= vol_min:
             liquidity = 3
             base += 3
+
+        # Technical confluence (2-of-3 indicators instead of requiring all 3)
         technical = 0
         tech_cfg = self.analysis_config.get("technical", {})
         if tech_cfg.get("enabled", False):
             tech = ctx.get("technical", {})
             daily = (tech.get("daily") or {}) if isinstance(tech, dict) else {}
             bonus = tech_cfg.get("confluence_score_bonus", 15)
+            min_indicators = tech_cfg.get("min_confluence_indicators", 2)
             rsi = daily.get("rsi")
             price_above_sma20 = daily.get("price_above_sma_20")
             macd_bullish = daily.get("macd_bullish")
             opt_type = (getattr(trade, "option_type", "CALL") or "CALL").upper()
             rsi_min_bull = tech_cfg.get("rsi_min_bullish", 50)
             rsi_max_bear = tech_cfg.get("rsi_max_bearish", 50)
-            if opt_type == "CALL" and rsi is not None and price_above_sma20 and (macd_bullish is True or macd_bullish is None):
-                if rsi >= rsi_min_bull:
-                    technical = bonus
-                    base += bonus
-            elif opt_type == "PUT" and rsi is not None and price_above_sma20 is False and (macd_bullish is False or macd_bullish is None):
-                if rsi <= rsi_max_bear:
-                    technical = bonus
-                    base += bonus
+
+            # Count how many indicators confirm
+            confirming = 0
+            if opt_type == "CALL":
+                if rsi is not None and rsi >= rsi_min_bull:
+                    confirming += 1
+                if price_above_sma20 is True:
+                    confirming += 1
+                if macd_bullish is True or macd_bullish is None:
+                    confirming += 1
+            elif opt_type == "PUT":
+                if rsi is not None and rsi <= rsi_max_bear:
+                    confirming += 1
+                if price_above_sma20 is False:
+                    confirming += 1
+                if macd_bullish is False or macd_bullish is None:
+                    confirming += 1
+
+            if confirming >= min_indicators:
+                technical = bonus
+                base += bonus
+
+        # Events adjustment
         events_adj = 0
         events_dict = ctx.get("events") or {}
         for etype, details in events_dict.items():
@@ -899,6 +988,8 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
             else:
                 events_adj -= 5
                 base -= 5
+
+        # Theta risk adjustment
         theta_risk_adj = 0
         dte = ctx.get("days_to_expiration")
         theta = (ctx.get("greeks") or {}).get("theta")
@@ -908,7 +999,7 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
                 theta_risk_adj = -6
                 base -= 6
 
-        # NEW: Price action bonus (at strong S/R zone)
+        # Price action bonus (at strong S/R zone)
         price_action_bonus = 0
         sr_analysis = ctx.get('sr_analysis', {})
         if sr_analysis and current_price:
@@ -920,20 +1011,20 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
                 if nearest_support:
                     distance_pct = abs(current_price - nearest_support) / current_price * 100
                     if distance_pct < 1.0:
-                        price_action_bonus = 15  # Increased from 10
+                        price_action_bonus = 15
                         base += 15
             elif opt_type == 'PUT':
                 nearest_resistance = key_levels.get('nearest_resistance')
                 if nearest_resistance:
                     distance_pct = abs(current_price - nearest_resistance) / current_price * 100
                     if distance_pct < 1.0:
-                        price_action_bonus = 15  # Increased from 10
+                        price_action_bonus = 15
                         base += 15
 
-        # NEW: Candlestick pattern bonus
+        # Candlestick pattern bonus
         pattern_bonus = 0
         patterns_cfg = self.analysis_config.get('patterns', {})
-        bonus_at_sr = patterns_cfg.get('bonus_at_sr', 12)  # Increased from 10
+        bonus_at_sr = patterns_cfg.get('bonus_at_sr', 12)
         patterns = ctx.get('candlestick_patterns', [])
         if patterns:
             opt_type = (getattr(trade, 'option_type', 'CALL') or 'CALL').upper()
@@ -947,10 +1038,10 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
                     base += bonus_at_sr
                     break
 
-        # NEW: Multi-timeframe alignment bonus
+        # Multi-timeframe alignment bonus
         mtf_bonus = 0
         trend_cfg = self.analysis_config.get('trend', {})
-        alignment_bonus_cfg = trend_cfg.get('alignment_bonus', 20)  # Increased from 15
+        alignment_bonus_cfg = trend_cfg.get('alignment_bonus', 20)
         mtf_alignment = ctx.get('multi_timeframe_alignment', {})
         if mtf_alignment and mtf_alignment.get('aligned'):
             opt_type = (getattr(trade, 'option_type', 'CALL') or 'CALL').upper()
@@ -961,31 +1052,21 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
                 mtf_bonus = alignment_bonus_cfg
                 base += alignment_bonus_cfg
 
-        # NEW: Volume confirmation bonus
+        # Volume confirmation bonus
         volume_bonus = 0
         vol_trend = ctx.get('volume_trend', {})
         if vol_trend:
-            # Check for strong volume trend (increasing with strong strength)
             if vol_trend.get('trend') == 'increasing' and vol_trend.get('strength') in ['strong', 'moderate']:
                 volume_bonus = 5
                 base += 5
 
-        # Counter-trend penalty (already in reds, but emphasize here)
-        counter_trend_penalty = 0
-        trend_analysis = ctx.get('trend_analysis', {})
-        if trend_analysis:
-            opt_type = (getattr(trade, 'option_type', 'CALL') or 'CALL').upper()
-            trend_direction = trend_analysis.get('direction', 'unknown')
-
-            if (opt_type == 'CALL' and trend_direction == 'downtrend') or \
-               (opt_type == 'PUT' and trend_direction == 'uptrend'):
-                # Always apply counter-trend penalty (critical risk factor)
-                counter_trend_penalty = -10
-                base -= 10
+        # NOTE: Counter-trend penalty is NOT applied separately here.
+        # It is already counted in red flags (HIGH severity) above.
+        # The old code double-penalized counter-trend trades.
 
         score = max(0, min(100, int(base)))
         breakdown = {
-            "base": 50,  # Updated from 70
+            "base": base_start,
             "rules": rules,
             "greens": greens,
             "reds": reds,
@@ -998,7 +1079,6 @@ Be direct, specific, and practical. Focus on actionable insights based on the te
             "pattern": pattern_bonus,
             "mtf_alignment": mtf_bonus,
             "volume": volume_bonus,
-            "counter_trend": counter_trend_penalty,
         }
         return score, breakdown
 

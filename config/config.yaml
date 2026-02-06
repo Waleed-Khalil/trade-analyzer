@@ -9,11 +9,9 @@ account:
   max_risk_per_day: 0.06       # 6% max daily loss limit
   max_open_positions: 5        # Max concurrent trades
 
-# Position Sizing
-sizing:
-  default_contracts: 1         # Fallback if calculation fails
-  min_premium_to_consider: 0.50  # Ignore cheap premiums
-  use_volatility_adjustment: true  # Reduce size in high IV
+# Position Sizing (basic defaults; smart sizing in Phase 6 section below)
+# NOTE: The 'sizing:' key below in Phase 6 section is the canonical one.
+#       These keys are merged there to avoid YAML duplicate-key override.
 
 # Stop Loss Rules (standard)
 stops:
@@ -54,6 +52,9 @@ targets:
   runner_remaining_pct: 0.50   # Keep 50% for runner
   max_runner_target_r: 5.0     # Hard target for runner
   trailing_stop_runner: 0.25   # Trail runner by 25% of peak
+  # Percentage-based profit target (simple +20% on premium)
+  target_profit_pct: 0.20      # 20% profit on premium
+  target_profit_pct_enabled: true  # Use percentage target as T1
 
 # AI Analysis (Anthropic-compatible API) — Go/No-Go, reasoning, stop, targets, support/resistance
 # For MiniMax: set ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic and use model MiniMax-M2.1
@@ -146,6 +147,31 @@ analysis:
     extension_levels: [1.272, 1.414, 1.618, 2.618]
     lookback_days: 60  # Find swing high/low from this period
 
+  # Scoring rebalance configuration
+  scoring:
+    base_score: 55                # Starting score (was 50)
+    high_severity_penalty: 10     # Points deducted per HIGH flag (was 12)
+    standard_medium_penalty: 4    # Default medium flag penalty (was 6)
+    high_impact_medium_flags: [stale_premium, wide_spread, stress_test, theta_risk]
+    high_impact_medium_penalty: 6 # Penalty for high-impact medium flags
+    low_impact_medium_flags: [macd_bearish, vwap_deviation, volume_divergence]
+    low_impact_medium_penalty: 2  # Penalty for low-impact medium flags
+    green_flag_points: 4          # Points per green flag (was 3)
+    green_flag_max: 20            # Max green flag bonus (was 15)
+    recommendation_tiers:
+      strong_play_min: 85
+      strong_play_label: "STRONG PLAY"
+      strong_play_guidance: "Full size. Let winners run past +20%. Trail with breakeven stop after T1."
+      play_min: 70
+      play_label: "PLAY"
+      play_guidance: "Normal size. Take 50% at +20%, trail rest with breakeven stop."
+      cautious_play_min: 55
+      cautious_play_label: "CAUTIOUS PLAY"
+      cautious_play_guidance: "Reduced size. Tight stop. Take +20% on full position."
+      skip_min: 0
+      skip_label: "SKIP"
+      skip_guidance: "Setup quality too low. Wait for better entry."
+
   # Multi-timeframe technical confluence (RSI, MACD, SMA) for setup quality
   technical:
     enabled: true
@@ -160,6 +186,7 @@ analysis:
     macd_slow: 26
     macd_signal: 9
     confluence_score_bonus: 15   # Add to setup_score when bullish/bearish confluence
+    min_confluence_indicators: 2  # Require 2 of 3 (RSI + SMA + MACD) instead of all 3
 
 # Dynamic Exit Strategies (Phase 5)
 trailing_stops:
@@ -179,11 +206,16 @@ trailing_stops:
 # Partial Exit Management (Phase 5)
 partial_exits:
   enabled: true
-  scaling_method: 'technical_weighted'  # 'technical_weighted', 'r_based', 'equal'
+  scaling_method: 'percentage'  # 'percentage', 'technical_weighted', 'r_based', 'equal'
   r_based:
     t1_contracts_pct: 0.40   # Take 40% at T1 (2R)
     t2_contracts_pct: 0.30   # Take 30% at T2 (3R)
     runner_contracts_pct: 0.30  # Let 30% run to T3 (5R+)
+  percentage:
+    target_pct: 0.20            # Take profit at +20% premium
+    t1_contracts_pct: 0.50      # Take 50% at target
+    runner_contracts_pct: 0.50  # Let 50% run with breakeven stop
+    breakeven_after_t1: true    # Move stop to breakeven after T1
 
 # Exit Pattern Detection (Phase 5)
 exit_patterns:
@@ -192,8 +224,11 @@ exit_patterns:
   require_volume_confirmation: true
   volume_spike_threshold: 1.5  # Volume must be >1.5x average
 
-# Smart Position Sizing (Phase 6)
+# Smart Position Sizing (Phase 6) — includes basic defaults
 sizing:
+  default_contracts: 1         # Fallback if calculation fails
+  min_premium_to_consider: 0.25  # Ignore cheap premiums
+  use_volatility_adjustment: true  # Reduce size in high IV
   method: 'composite'  # 'composite', 'kelly', 'fixed'
   kelly:
     enabled: true

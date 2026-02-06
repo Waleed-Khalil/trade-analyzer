@@ -39,6 +39,9 @@ class PartialExitManager:
         self.t2_pct = self.r_based_config.get('t2_contracts_pct', 0.30)
         self.runner_pct = self.r_based_config.get('runner_contracts_pct', 0.30)
 
+        # Percentage-based config
+        self.pct_config = self.config.get('percentage', {})
+
     def calculate_partial_exit_plan(
         self,
         entry_price: float,
@@ -68,7 +71,14 @@ class PartialExitManager:
         """
         risk = abs(entry_price - stop_loss)
 
-        if self.scaling_method == 'technical_weighted' and sr_zones:
+        if self.scaling_method == 'percentage':
+            return self._percentage_based_exits(
+                entry_price,
+                risk,
+                total_contracts,
+                option_type
+            )
+        elif self.scaling_method == 'technical_weighted' and sr_zones:
             return self._technical_weighted_exits(
                 entry_price,
                 risk,
@@ -172,6 +182,45 @@ class PartialExitManager:
         else:
             # Fall back to R-based if insufficient technical levels
             return self._r_based_exits(entry_price, risk, total_contracts, option_type, None, None, None)
+
+        return self._build_exit_plan(exit_levels, total_contracts, entry_price, option_type)
+
+    def _percentage_based_exits(
+        self,
+        entry_price: float,
+        risk: float,
+        total_contracts: int,
+        option_type: str
+    ) -> Dict[str, Any]:
+        """Create exit plan based on percentage profit targets."""
+        exit_levels = []
+
+        target_pct = self.pct_config.get('target_pct', 0.20)
+        t1_contracts_pct = self.pct_config.get('t1_contracts_pct', 0.50)
+        runner_contracts_pct = self.pct_config.get('runner_contracts_pct', 0.50)
+
+        # T1: +20% premium (50% of contracts)
+        t1_price = entry_price * (1 + target_pct)
+        t1_r = (t1_price - entry_price) / risk if risk > 0 else 0
+        exit_levels.append(ExitLevel(
+            price=t1_price,
+            contracts_pct=t1_contracts_pct,
+            r_multiple=t1_r,
+            trigger_type='percentage',
+            reason=f"T1 at +{target_pct:.0%} premium (${t1_price:.2f}) — take {t1_contracts_pct:.0%}, move stop to breakeven"
+        ))
+
+        # Runner: +40% premium (2x the target) as stretch goal (remaining contracts)
+        stretch_pct = target_pct * 2
+        runner_price = entry_price * (1 + stretch_pct)
+        runner_r = (runner_price - entry_price) / risk if risk > 0 else 0
+        exit_levels.append(ExitLevel(
+            price=runner_price,
+            contracts_pct=runner_contracts_pct,
+            r_multiple=runner_r,
+            trigger_type='percentage',
+            reason=f"Runner at +{stretch_pct:.0%} premium (${runner_price:.2f}) — trail with breakeven stop"
+        ))
 
         return self._build_exit_plan(exit_levels, total_contracts, entry_price, option_type)
 

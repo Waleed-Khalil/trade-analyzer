@@ -340,6 +340,10 @@ class RiskEngine:
         stop_loss = stop_info.get('stop_loss', trade.premium * 0.5)
         risk_per_share = trade.premium - stop_loss
 
+        # Check for percentage-based profit target
+        pct_target_enabled = self.targets.get('target_profit_pct_enabled', False)
+        pct_target = self.targets.get('target_profit_pct', 0.20)
+
         # Get S/R zones for exit planning
         sr_zones = None
         if market_context:
@@ -349,7 +353,7 @@ class RiskEngine:
         atr = None
         if market_context:
             atr = market_context.get('atr')
-        
+
         # Try to get technically-grounded targets
         technical_targets = None
         if current_price and market_context:
@@ -390,22 +394,37 @@ class RiskEngine:
             trade, position, stop_loss, atr, sr_zones
         )
 
+        # If percentage target enabled, calculate it
+        pct_target_price = None
+        if pct_target_enabled:
+            pct_target_price = round(trade.premium * (1 + pct_target), 2)
+
         # Use technical targets if available, otherwise use R-based
         if technical_targets and technical_targets.get("conservative_target"):
             cons = technical_targets["conservative_target"]
             mod = technical_targets.get("moderate_target")
             agg = technical_targets.get("aggressive_target")
 
-            # Use conservative (first technical level) as T1
-            target_1 = cons.get("premium", trade.premium + risk_per_share * profit_target_r)
-            target_1_r = cons.get("r_multiple", profit_target_r)
+            # Determine T1: use percentage target if enabled, else technical
+            if pct_target_price:
+                target_1 = pct_target_price
+                target_1_r = round((target_1 - trade.premium) / risk_per_share, 1) if risk_per_share > 0 else 0
+                target_1_type = "percentage"
+                target_1_label = f"+{pct_target:.0%} premium"
+            else:
+                target_1 = cons.get("premium", trade.premium + risk_per_share * profit_target_r)
+                target_1_r = cons.get("r_multiple", profit_target_r)
+                target_1_type = "technical"
+                target_1_label = f"{target_1_r}R (technical)"
 
-            # Use moderate as runner if available
+            # Use technical/moderate as runner target
             runner_target = mod.get("premium", trade.premium + risk_per_share * max_runner_target_r)
 
             return {
                 "target_1": round(target_1, 2),
                 "target_1_r": round(target_1_r, 1),
+                "target_1_type": target_1_type,
+                "target_1_label": target_1_label,
                 "runner_activated": True,
                 "runner_contracts": int(position.contracts * runner_remaining_pct),
                 "runner_target": round(runner_target, 2),
@@ -417,21 +436,32 @@ class RiskEngine:
                 "trailing_stop_plan": trailing_stop_plan,
                 "exit_monitoring": exit_monitoring,
             }
-        
-        # Fallback to R-based targets
-        target_1 = trade.premium + (risk_per_share * profit_target_r)
-        target_1_r = profit_target_r
+
+        # Fallback to R-based targets (or percentage target as T1)
+        if pct_target_price:
+            target_1 = pct_target_price
+            target_1_r = round((target_1 - trade.premium) / risk_per_share, 1) if risk_per_share > 0 else 0
+            target_1_type = "percentage"
+            target_1_label = f"+{pct_target:.0%} premium"
+        else:
+            target_1 = trade.premium + (risk_per_share * profit_target_r)
+            target_1_r = profit_target_r
+            target_1_type = "r_based"
+            target_1_label = f"{target_1_r}R"
+
         runner_target = trade.premium + (risk_per_share * max_runner_target_r)
 
         return {
             "target_1": round(target_1, 2),
-            "target_1_r": target_1_r,
+            "target_1_r": round(target_1_r, 1) if isinstance(target_1_r, float) else target_1_r,
+            "target_1_type": target_1_type,
+            "target_1_label": target_1_label,
             "runner_activated": True,
             "runner_contracts": int(position.contracts * runner_remaining_pct),
             "runner_target": round(runner_target, 2),
             "max_runner_target_r": max_runner_target_r,
             "is_technical": False,
-            "reasoning": f"R-based targets ({profit_target_r}R - {max_runner_target_r}R)",
+            "reasoning": f"R-based targets ({profit_target_r}R - {max_runner_target_r}R)" if not pct_target_price else f"+{pct_target:.0%} premium target + R-based runner",
             "partial_exit_plan": partial_exit_plan,
             "trailing_stop_plan": trailing_stop_plan,
             "exit_monitoring": exit_monitoring,
