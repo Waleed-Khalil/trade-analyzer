@@ -219,6 +219,10 @@ def _identify_trend_from_adx(df: pd.DataFrame, threshold: int = 25) -> Dict[str,
 
     current_adx = adx.iloc[-1]
 
+    # Handle NaN ADX (insufficient data)
+    if pd.isna(current_adx):
+        return {'direction': 'unknown', 'strength': 0, 'confidence': 0, 'adx': 0, 'method': 'adx'}
+
     # Determine direction from price action
     sma_20 = df['close'].rolling(20).mean()
     current_price = df['close'].iloc[-1]
