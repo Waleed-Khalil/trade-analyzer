@@ -5,6 +5,7 @@ Multi-level profit taking strategy (40/30/30 scaling)
 
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
+import pandas as pd
 
 
 @dataclass
@@ -184,6 +185,120 @@ class PartialExitManager:
             return self._r_based_exits(entry_price, risk, total_contracts, option_type, None, None, None)
 
         return self._build_exit_plan(exit_levels, total_contracts, entry_price, option_type)
+
+    def check_dynamic_exit_adjustments(
+        self,
+        df: pd.DataFrame,
+        current_price: float,
+        current_exit_level: Dict[str, Any],
+        remaining_contracts: int,
+        option_type: str,
+        sr_zones: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Check for breakout or rejection patterns that modify exit plan.
+
+        This should be called during live trade monitoring to adjust exits dynamically.
+
+        Args:
+            df: Recent OHLC data (last 20+ bars recommended)
+            current_price: Current underlying price
+            current_exit_level: Next planned exit level from exit_plan
+            remaining_contracts: Contracts still open
+            option_type: 'CALL' or 'PUT'
+            sr_zones: Support/resistance zones dict
+
+        Returns:
+            Dict with adjustment action and parameters
+        """
+        try:
+            from analysis.exit_patterns import (
+                detect_resistance_breakout,
+                detect_resistance_rejection,
+                get_next_resistance_level
+            )
+        except ModuleNotFoundError:
+            # Try absolute import if relative fails
+            from src.analysis.exit_patterns import (
+                detect_resistance_breakout,
+                detect_resistance_rejection,
+                get_next_resistance_level
+            )
+
+        if not current_exit_level or not sr_zones:
+            return {'action': 'no_adjustment', 'reason': 'Missing exit level or S/R zones'}
+
+        target_level = current_exit_level.get('price')
+        if not target_level:
+            return {'action': 'no_adjustment', 'reason': 'No target price in exit level'}
+
+        # Get strength from resistance zones
+        if option_type == 'CALL':
+            zones = sr_zones.get('resistance_zones', [])
+            matching_zone = next((z for z in zones if abs(z['price'] - target_level) / target_level < 0.01), None)
+        else:
+            zones = sr_zones.get('support_zones', [])
+            matching_zone = next((z for z in zones if abs(z['price'] - target_level) / target_level < 0.01), None)
+
+        resistance_strength = matching_zone.get('strength', 50) if matching_zone else 50
+
+        # ========== CHECK FOR BREAKOUT ==========
+        breakout_result = detect_resistance_breakout(
+            df=df,
+            current_price=current_price,
+            resistance_level=target_level,
+            resistance_strength=resistance_strength
+        )
+
+        if breakout_result['action'] == 'breakout_confirmed':
+            # Find next resistance level
+            next_level = get_next_resistance_level(
+                resistance_zones=zones if option_type == 'CALL' else sr_zones.get('support_zones', []),
+                current_level=target_level,
+                current_price=current_price
+            )
+
+            return {
+                'action': 'adjust_for_breakout',
+                'breakout_level': target_level,
+                'new_stop': breakout_result['new_stop'],
+                'new_runner_target': next_level,
+                'hold_contracts': remaining_contracts,  # Hold all remaining
+                'reason': breakout_result['reason'],
+                'recommendation': 'Hold runner - trail stop to broken resistance',
+                'urgency': breakout_result['urgency']
+            }
+
+        # ========== CHECK FOR REJECTION ==========
+        rejection_result = detect_resistance_rejection(
+            df=df,
+            resistance_level=target_level,
+            option_type=option_type
+        )
+
+        if rejection_result['action'] == 'rejection_detected':
+            # Exit more contracts than planned
+            exit_pct = rejection_result['exit_pct']
+            exit_contracts = int(remaining_contracts * exit_pct)
+
+            return {
+                'action': 'exit_on_rejection',
+                'rejection_level': target_level,
+                'pattern': rejection_result['pattern'],
+                'exit_contracts': exit_contracts,
+                'exit_pct': exit_pct,
+                'reason': rejection_result['reason'],
+                'recommendation': rejection_result['recommendation'],
+                'urgency': rejection_result['urgency']
+            }
+
+        # No adjustment needed
+        return {
+            'action': 'no_adjustment',
+            'reason': 'No breakout or rejection detected',
+            'status': 'monitor',
+            'next_check': 'Continue monitoring for patterns'
+        }
 
     def _percentage_based_exits(
         self,

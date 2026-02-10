@@ -373,6 +373,287 @@ def _check_volume_confirmation(
     return patterns
 
 
+# ============================================================================
+# PHASE A: BREAKOUT DETECTION - Resistance Level Breakouts
+# ============================================================================
+
+def detect_resistance_breakout(
+    df: pd.DataFrame,
+    current_price: float,
+    resistance_level: float,
+    resistance_strength: int,
+    volume_threshold_multiplier: float = 1.5,
+    breakout_confirmation_pct: float = 0.005
+) -> Dict[str, Any]:
+    """
+    Detect breakout above resistance with volume confirmation.
+
+    When price breaks resistance convincingly:
+    - Hold runner for next level
+    - Trail stop to broken resistance (now support)
+    - Set new runner target
+
+    Args:
+        df: Recent OHLC data (min 20 bars for volume calc)
+        current_price: Current underlying price
+        resistance_level: Resistance price to check
+        resistance_strength: Strength score (0-100) from price_action
+        volume_threshold_multiplier: Volume must be >Nx average
+        breakout_confirmation_pct: Price must be >X% above level (0.005 = 0.5%)
+
+    Returns:
+        Dict with action, new_stop, new_target, reasoning
+    """
+    if len(df) < 20:
+        return {'action': 'insufficient_data', 'reason': 'Need at least 20 bars for analysis'}
+
+    # Check if price is above resistance
+    breakout_threshold = resistance_level * (1 + breakout_confirmation_pct)
+    if current_price < breakout_threshold:
+        return {
+            'action': 'no_breakout',
+            'reason': f'Price ${current_price:.2f} not above ${breakout_threshold:.2f}'
+        }
+
+    # Check volume confirmation
+    avg_volume = df['volume'].tail(20).mean()
+    current_volume = df['volume'].iloc[-1]
+    volume_confirmed = current_volume > avg_volume * volume_threshold_multiplier
+
+    if not volume_confirmed:
+        return {
+            'action': 'breakout_unconfirmed',
+            'reason': f'Breakout without volume (current: {current_volume:.0f}, need: {avg_volume * volume_threshold_multiplier:.0f})',
+            'volume_ratio': current_volume / avg_volume if avg_volume > 0 else 0
+        }
+
+    # Check for clean breakout (not just a spike wick)
+    last_bar = df.iloc[-1]
+    close_above_level = last_bar['close'] > resistance_level
+
+    if not close_above_level:
+        return {
+            'action': 'false_breakout',
+            'reason': f'Wick above ${resistance_level:.2f} but close below - likely rejection'
+        }
+
+    # CONFIRMED BREAKOUT
+    # Set new stop slightly below broken resistance
+    new_stop = resistance_level * 0.995  # 0.5% buffer below
+
+    return {
+        'action': 'breakout_confirmed',
+        'new_stop': new_stop,
+        'reason': f'Broke ${resistance_level:.2f} (strength: {resistance_strength}) on {current_volume/avg_volume:.1f}x volume',
+        'volume_ratio': current_volume / avg_volume,
+        'resistance_strength': resistance_strength,
+        'recommendation': 'Hold runner - trail stop to broken level (now support)',
+        'urgency': 'high' if resistance_strength >= 75 else 'medium'
+    }
+
+
+def get_next_resistance_level(
+    resistance_zones: List[Dict[str, Any]],
+    current_level: float,
+    current_price: float
+) -> Optional[float]:
+    """
+    Find next resistance level above current broken level.
+
+    Args:
+        resistance_zones: List of resistance zone dicts from price_action
+        current_level: Just-broken resistance level
+        current_price: Current underlying price
+
+    Returns:
+        Next resistance price or None
+    """
+    if not resistance_zones:
+        return None
+
+    # Filter to levels above current level and price
+    higher_levels = [
+        z for z in resistance_zones
+        if z['price'] > max(current_level, current_price)
+    ]
+
+    if not higher_levels:
+        return None
+
+    # Return closest level above
+    return min(higher_levels, key=lambda z: z['price'])['price']
+
+
+# ============================================================================
+# PHASE B: REJECTION DETECTION - Resistance Rejection Patterns
+# ============================================================================
+
+def detect_resistance_rejection(
+    df: pd.DataFrame,
+    resistance_level: float,
+    option_type: str = 'CALL',
+    proximity_pct: float = 0.005,
+    wick_ratio_threshold: float = 0.7
+) -> Dict[str, Any]:
+    """
+    Detect bearish rejection patterns at resistance (for CALLs).
+
+    Common rejection patterns:
+    - Shooting star: Small body, long upper wick, close near low
+    - Bearish engulfing at level
+    - Long upper wick (>70% of candle range)
+
+    When detected at resistance → EXIT MORE CONTRACTS
+
+    Args:
+        df: Recent OHLC data (min 3 bars)
+        resistance_level: Resistance price to check
+        option_type: 'CALL' or 'PUT'
+        proximity_pct: How close to level counts as "at resistance" (0.005 = 0.5%)
+        wick_ratio_threshold: Upper wick must be >X% of total range (0.7 = 70%)
+
+    Returns:
+        Dict with action, exit_pct, reasoning
+    """
+    if len(df) < 3:
+        return {'action': 'insufficient_data', 'reason': 'Need at least 3 bars'}
+
+    last_bar = df.iloc[-1]
+    prev_bar = df.iloc[-2]
+
+    # Check if price is near resistance
+    high = last_bar['high']
+    distance = abs(high - resistance_level) / resistance_level
+
+    if distance > proximity_pct:
+        return {
+            'action': 'not_at_level',
+            'reason': f'High ${high:.2f} not near resistance ${resistance_level:.2f}'
+        }
+
+    # Pattern detection (for CALLs - bearish rejection)
+    if option_type == 'CALL':
+        rejection = _detect_bearish_rejection_at_level(
+            last_bar, prev_bar, resistance_level, wick_ratio_threshold
+        )
+    else:
+        # For PUTs - look for bullish rejection at support
+        rejection = _detect_bullish_rejection_at_level(
+            last_bar, prev_bar, resistance_level, wick_ratio_threshold
+        )
+
+    if rejection:
+        # Increase exit percentage based on rejection strength
+        if rejection['pattern'] == 'bearish_engulfing':
+            exit_pct = 0.75  # Strong rejection - exit 75%
+        elif rejection['pattern'] == 'shooting_star':
+            exit_pct = 0.60  # Medium rejection - exit 60%
+        elif rejection['pattern'] == 'long_wick':
+            exit_pct = 0.50  # Weak rejection - exit 50%
+        else:
+            exit_pct = 0.50
+
+        return {
+            'action': 'rejection_detected',
+            'exit_pct': exit_pct,
+            'pattern': rejection['pattern'],
+            'strength': rejection['strength'],
+            'reason': f"{rejection['pattern']} at ${resistance_level:.2f} - take increased profit",
+            'recommendation': f'Exit {exit_pct:.0%} of position - resistance holding',
+            'urgency': 'high'
+        }
+
+    return {'action': 'no_rejection', 'reason': 'No rejection pattern detected'}
+
+
+def _detect_bearish_rejection_at_level(
+    current_bar: pd.Series,
+    previous_bar: pd.Series,
+    level: float,
+    wick_threshold: float
+) -> Optional[Dict[str, Any]]:
+    """Helper: Detect bearish rejection patterns."""
+    body = abs(current_bar['close'] - current_bar['open'])
+    total_range = current_bar['high'] - current_bar['low']
+    upper_wick = current_bar['high'] - max(current_bar['open'], current_bar['close'])
+    lower_wick = min(current_bar['open'], current_bar['close']) - current_bar['low']
+
+    # Shooting star pattern
+    if upper_wick > body * 2 and lower_wick < body * 0.3:
+        if current_bar['close'] < current_bar['open']:  # Bearish close
+            return {
+                'pattern': 'shooting_star',
+                'strength': 75,
+                'description': 'Shooting star - strong rejection'
+            }
+
+    # Bearish engulfing at level
+    if (previous_bar['close'] > previous_bar['open'] and  # Prev bullish
+        current_bar['close'] < current_bar['open'] and    # Curr bearish
+        current_bar['open'] >= previous_bar['close'] and  # Opens above prev close
+        current_bar['close'] <= previous_bar['open']):    # Closes below prev open
+        return {
+            'pattern': 'bearish_engulfing',
+            'strength': 90,
+            'description': 'Bearish engulfing - very strong rejection'
+        }
+
+    # Long upper wick (rejection wick)
+    if total_range > 0 and upper_wick / total_range > wick_threshold:
+        if current_bar['close'] < current_bar['open']:  # Bearish close
+            return {
+                'pattern': 'long_wick',
+                'strength': 65,
+                'description': f'Long upper wick ({upper_wick/total_range:.0%}) - moderate rejection'
+            }
+
+    return None
+
+
+def _detect_bullish_rejection_at_level(
+    current_bar: pd.Series,
+    previous_bar: pd.Series,
+    level: float,
+    wick_threshold: float
+) -> Optional[Dict[str, Any]]:
+    """Helper: Detect bullish rejection patterns (for PUTs at support)."""
+    body = abs(current_bar['close'] - current_bar['open'])
+    total_range = current_bar['high'] - current_bar['low']
+    upper_wick = current_bar['high'] - max(current_bar['open'], current_bar['close'])
+    lower_wick = min(current_bar['open'], current_bar['close']) - current_bar['low']
+
+    # Hammer pattern
+    if lower_wick > body * 2 and upper_wick < body * 0.3:
+        if current_bar['close'] > current_bar['open']:  # Bullish close
+            return {
+                'pattern': 'hammer',
+                'strength': 75,
+                'description': 'Hammer - strong bullish rejection'
+            }
+
+    # Bullish engulfing at level
+    if (previous_bar['close'] < previous_bar['open'] and  # Prev bearish
+        current_bar['close'] > current_bar['open'] and    # Curr bullish
+        current_bar['open'] <= previous_bar['close'] and  # Opens below prev close
+        current_bar['close'] >= previous_bar['open']):    # Closes above prev open
+        return {
+            'pattern': 'bullish_engulfing',
+            'strength': 90,
+            'description': 'Bullish engulfing - very strong rejection'
+        }
+
+    # Long lower wick (rejection wick)
+    if total_range > 0 and lower_wick / total_range > wick_threshold:
+        if current_bar['close'] > current_bar['open']:  # Bullish close
+            return {
+                'pattern': 'long_wick',
+                'strength': 65,
+                'description': f'Long lower wick ({lower_wick/total_range:.0%}) - moderate rejection'
+            }
+
+    return None
+
+
 # Example usage
 if __name__ == "__main__":
     import yfinance as yf
