@@ -307,3 +307,155 @@ def get_events(ticker: str, dte: int) -> Dict[str, Any]:
     except Exception:
         pass
     return events
+
+
+def get_enhanced_technical_context(ticker: str) -> Dict[str, Any]:
+    """
+    Get enhanced technical indicators for better analysis.
+    
+    Returns dict with:
+    - daily: {sma_20, sma_50, sma_200, rsi, macd, macd_signal, above_sma_20, above_sma_50}
+    - volume_trend: {trend, strength, rise_volume, decline_volume, change_pct}
+    - market_context: {vix, spy_trend, vix_change_pct}
+    """
+    try:
+        import yfinance as yf
+        import pandas as pd
+        import numpy as np
+        
+        ctx = {}
+        
+        # Get daily data for indicators
+        df = yf.download(ticker, period="3mo", interval="1d", progress=False)
+        
+        if df is None or df.empty:
+            return ctx
+        
+        # Standardize columns
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [str(col).lower() for col in df.columns]
+        
+        if 'close' not in df.columns:
+            return ctx
+        
+        close = df['close']
+        high = df.get('high', close)
+        low = df.get('low', close)
+        volume = df.get('volume', pd.Series([0] * len(df)))
+        
+        # Calculate SMAs
+        sma_20 = close.rolling(20).mean().iloc[-1]
+        sma_50 = close.rolling(50).mean().iloc[-1]
+        sma_200 = close.rolling(200).mean().iloc[-1] if len(df) >= 200 else None
+        
+        current_price = close.iloc[-1]
+        
+        # Calculate RSI
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        rsi_val = rsi.iloc[-1] if len(rsi) > 0 else None
+        
+        # Calculate MACD
+        ema_12 = close.ewm(span=12).mean()
+        ema_26 = close.ewm(span=26).mean()
+        macd_line = ema_12 - ema_26
+        macd_signal_line = macd_line.ewm(span=9).mean()
+        macd_val = macd_line.iloc[-1]
+        signal_val = macd_signal_line.iloc[-1]
+        
+        # Daily technical summary
+        ctx['daily'] = {
+            'sma_20': float(sma_20) if sma_20 and not np.isnan(sma_20) else None,
+            'sma_50': float(sma_50) if sma_50 and not np.isnan(sma_50) else None,
+            'sma_200': float(sma_200) if sma_200 and not np.isnan(sma_200) else None,
+            'rsi': float(rsi_val) if rsi_val and not np.isnan(rsi_val) else None,
+            'macd': float(macd_val) if macd_val and not np.isnan(macd_val) else None,
+            'macd_signal': float(signal_val) if signal_val and not np.isnan(signal_val) else None,
+            'price_above_sma_20': current_price > sma_20 if sma_20 and not np.isnan(sma_20) else None,
+            'price_above_sma_50': current_price > sma_50 if sma_50 and not np.isnan(sma_50) else None,
+        }
+        
+        # Volume analysis
+        if len(volume) >= 5:
+            avg_vol = volume.rolling(5).mean().iloc[-1]
+            latest_vol = volume.iloc[-1]
+            vol_change = (latest_vol - avg_vol) / avg_vol * 100 if avg_vol > 0 else 0
+            
+            # Rise vs decline volume
+            price_change = close.diff()
+            rise_vol = volume[price_change > 0].sum()
+            decline_vol = volume[price_change < 0].sum()
+            
+            # Volume trend
+            if vol_change > 20:
+                vol_trend = 'increasing'
+                vol_strength = 'strong'
+            elif vol_change > 10:
+                vol_trend = 'increasing'
+                vol_strength = 'moderate'
+            elif vol_change > -10:
+                vol_trend = 'stable'
+                vol_strength = 'normal'
+            else:
+                vol_trend = 'decreasing'
+                vol_strength = 'low'
+            
+            ctx['volume_trend'] = {
+                'trend': vol_trend,
+                'strength': vol_strength,
+                'rise_volume': int(rise_vol),
+                'decline_volume': int(decline_vol),
+                'change_pct': round(vol_change, 1),
+            }
+        
+        # Market context (SPY, VIX)
+        try:
+            spy = yf.Ticker('SPY')
+            spy_close = spy.history(period="5d")['Close']
+            if len(spy_close) >= 2:
+                spy_now = spy_close.iloc[-1]
+                spy_5d_ago = spy_close.iloc[-6] if len(spy_close) >= 6 else spy_close.iloc[0]
+                spy_change = (spy_now - spy_5d_ago) / spy_5d_ago * 100
+                
+                if spy_change > 2:
+                    spy_trend = 'bullish'
+                elif spy_change > 0.5:
+                    spy_trend = 'slight_bullish'
+                elif spy_change < -2:
+                    spy_trend = 'bearish'
+                elif spy_change < -0.5:
+                    spy_trend = 'slight_bearish'
+                else:
+                    spy_trend = 'neutral'
+                
+                ctx['market_context'] = {
+                    'spy_trend': spy_trend,
+                    'spy_change_pct': round(spy_change, 2),
+                }
+        except:
+            pass
+        
+        # VIX
+        try:
+            vix_ticker = yf.Ticker('^VIX')
+            vix_close = vix_ticker.history(period="5d")['Close']
+            if len(vix_close) >= 2:
+                vix_now = vix_close.iloc[-1]
+                vix_5d_ago = vix_close.iloc[-5] if len(vix_close) >= 5 else vix_close.iloc[0]
+                vix_change = (vix_now - vix_5d_ago) / vix_5d_ago * 100
+                
+                if 'market_context' not in ctx:
+                    ctx['market_context'] = {}
+                ctx['market_context']['vix'] = float(vix_now)
+                ctx['market_context']['vix_change_pct'] = round(vix_change, 2)
+        except:
+            pass
+        
+        return ctx
+        
+    except Exception:
+        return {}
